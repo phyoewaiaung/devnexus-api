@@ -5,20 +5,7 @@
 ---
 
 ## Table of Contents
-
-- [Features](#features)  
-- [Tech Stack](#tech-stack)  
-- [Getting Started](#getting-started)  
-- [Environment Variables](#environment-variables)  
-- [API Endpoints](#api-endpoints)  
-- [Authentication](#authentication)  
-- [Middleware](#middleware)  
-- [Testing](#testing)  
-- [Folder Structure](#folder-structure)  
-- [Contributing](#contributing)  
-- [License](#license)  
-
----
+//wip
 
 ## Features
 
@@ -56,5 +43,5 @@
 
 1. Clone the repository:  
    ```bash
-   git clone https://github.com/yourusername/devconnect-backend.git
+   git clone https://github.com/phyoewaiaung/devnexus-api.git
    cd devconnect-backend
