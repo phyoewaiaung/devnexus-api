@@ -1,4 +1,4 @@
-# DevConnect Backend
+# DevNexus API
 
 **DevConnect** is a social media platform backend tailored for developers to collaborate, share code, and communicate in real-time. This backend is built using the MERN stack components with Node.js, Express.js, MongoDB, and Firebase integration.
 
