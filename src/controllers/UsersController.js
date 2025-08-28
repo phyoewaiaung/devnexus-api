@@ -1,116 +1,129 @@
 const jwt = require('jsonwebtoken');
-const User = require('../models/UsersModel'); 
-const bcrypt = require('bcrypt');
+const User = require('../models/UsersModel');
 
-const generateAccessToken = (user) => {
-  return jwt.sign(
+const signAccess = (user) =>
+  jwt.sign(
     { id: user._id, username: user.username, roles: user.roles },
     process.env.JWT_ACCESS_SECRET,
-    { expiresIn: process.env.ACCESS_TOKEN_EXPIRY }
+    { expiresIn: process.env.ACCESS_TOKEN_EXPIRY || '15m' }
   );
-};
 
-const generateRefreshToken = (user) => {
-  return jwt.sign(
+const signRefresh = (user) =>
+  jwt.sign(
     { id: user._id },
     process.env.JWT_REFRESH_SECRET,
-    { expiresIn: process.env.REFRESH_TOKEN_EXPIRY }
+    { expiresIn: process.env.REFRESH_TOKEN_EXPIRY || '7d' }
   );
-};
 
-// Register user
+// POST /register
 exports.register = async (req, res, next) => {
   try {
-    const { name, username, email, password, bio, skills, avatarUrl, socialLinks } = req.body;
-
+    let { name, username, email, password, bio, skills, avatarUrl, socialLinks } = req.body;
     if (!name || !username || !email || !password) {
       return res.status(400).json({ message: 'Missing required fields' });
     }
+    username = String(username).toLowerCase().trim();
+    email = String(email).toLowerCase().trim();
 
-    const existingUser = await User.findOne({ $or: [{ email }, { username }] });
-    if (existingUser) return res.status(409).json({ message: 'User already exists' });
+    const exists = await User.findOne({ $or: [{ email }, { username }] });
+    if (exists) return res.status(409).json({ message: 'User already exists' });
 
-    const passwordHash = password; // Will be hashed by mongoose pre-save middleware
+    const parseSkills = (v) =>
+      Array.isArray(v) ? v : String(v || '').split(',').map(s => s.trim()).filter(Boolean);
+    const parseLinks = (v) => {
+      const o = v || {};
+      return {
+        website: o.website || '',
+        github: o.github || '',
+        twitter: o.twitter || '',
+        linkedin: o.linkedin || ''
+      };
+    };
+    const user = new User({
+      name, username, email,
+      passwordHash: password,
+      bio: bio || '',
+      skills: parseSkills(skills),
+      avatarUrl: avatarUrl || '',
+      socialLinks: parseLinks(socialLinks),
+      roles: ['user'], // locked
+    })
+    await user.save();
 
-    const newUser = new User({
-      name,
-      username,
-      email,
-      passwordHash,
-      bio,
-      skills,
-      avatarUrl,
-      socialLinks
-    });
-
-    await newUser.save();
-
-    res.status(201).json({ message: 'User registered successfully' });
-
-  } catch (error) {
-    next(error);
+    return res.status(201).json({ message: 'Registered' });
+  } catch (e) {
+    next(e);
   }
 };
 
-// Login user
+// POST /login
 exports.login = async (req, res, next) => {
   try {
     const { usernameOrEmail, password } = req.body;
     if (!usernameOrEmail || !password) {
       return res.status(400).json({ message: 'Missing credentials' });
     }
-
-    const user = await User.findOne({
-      $or: [{ email: usernameOrEmail.toLowerCase() }, { username: usernameOrEmail }]
-    });
+    const key = String(usernameOrEmail).toLowerCase().trim();
+    const user = await User.findOne({ $or: [{ email: key }, { username: key }] });
     if (!user) return res.status(401).json({ message: 'Invalid credentials' });
 
-    const passwordMatch = await user.comparePassword(password);
-    if (!passwordMatch) return res.status(401).json({ message: 'Invalid credentials' });
+    const ok = await user.comparePassword(password);
+    if (!ok) return res.status(401).json({ message: 'Invalid credentials' });
 
-    const accessToken = generateAccessToken(user);
-    const refreshToken = generateRefreshToken(user);
+    const accessToken = signAccess(user);
+    const refreshToken = signRefresh(user);
 
-    // Store refresh token in httpOnly cookie
     res.cookie('refreshToken', refreshToken, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
-      sameSite: 'Strict',
-      maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
+      sameSite: 'Lax',
+      maxAge: 7 * 24 * 60 * 60 * 1000,
+      path: '/api/users',
     });
 
-    res.json({ accessToken });
-
-  } catch (error) {
-    next(error);
+    return res.json({ accessToken });
+  } catch (e) {
+    next(e);
   }
 };
 
-// Refresh token endpoint
-exports.refresh = (req, res, next) => {
+// POST /refresh
+exports.refresh = async (req, res, next) => {
   try {
-    const token = req.cookies.refreshToken;
+    const token = req.cookies?.refreshToken;
     if (!token) return res.status(401).json({ message: 'Refresh token missing' });
 
-    jwt.verify(token, process.env.JWT_REFRESH_SECRET, (err, decoded) => {
+    jwt.verify(token, process.env.JWT_REFRESH_SECRET, async (err, decoded) => {
       if (err) return res.status(403).json({ message: 'Invalid refresh token' });
+      const user = await User.findById(decoded.id).select('_id username roles');
+      if (!user) return res.status(401).json({ message: 'User not found' });
 
-      const accessToken = jwt.sign(
-        { id: decoded.id },
-        process.env.JWT_ACCESS_SECRET,
-        { expiresIn: process.env.ACCESS_TOKEN_EXPIRY }
-      );
-
-      res.json({ accessToken });
+      const accessToken = signAccess(user);
+      return res.json({ accessToken });
     });
-
-  } catch (error) {
-    next(error);
+  } catch (e) {
+    next(e);
   }
 };
 
-// Logout user (clear refresh token)
-exports.logout = (req, res) => {
-  res.clearCookie('refreshToken', { httpOnly: true, sameSite: 'Strict', secure: process.env.NODE_ENV === 'production' });
-  res.json({ message: 'Logged out successfully' });
+// POST /logout
+exports.logout = (_req, res) => {
+  res.clearCookie('refreshToken', {
+    httpOnly: true,
+    sameSite: 'Lax',
+    secure: process.env.NODE_ENV === 'production',
+    path: '/api/users',
+  });
+  res.json({ message: 'Logged out' });
+};
+
+// GET /me
+exports.me = async (req, res, next) => {
+  try {
+    const user = await User.findById(req.user.id).select('-passwordHash -__v');
+    if (!user) return res.status(404).json({ message: 'Not found' });
+    res.json({ user });
+  } catch (e) {
+    next(e);
+  }
 };

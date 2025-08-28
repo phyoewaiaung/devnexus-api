@@ -1,33 +1,21 @@
-// src/app.js
 const express = require('express');
-const helmet = require('helmet');
-const morgan = require('morgan');
-const cors = require('cors');
 const cookieParser = require('cookie-parser');
-const authRoutes =  require('./routes/UserRoutes.js')
+const path = require('path');
 
 const app = express();
-
-// Middleware
-app.use(helmet());
-app.use(morgan('dev'));
 app.use(express.json());
-app.use(cors({ origin: process.env.FRONTEND_ORIGIN, credentials: true }));
 app.use(cookieParser());
-app.use(express.urlencoded({ extended: true }));
 
-// Routes
-// app.get('/', (req, res) => {
-//   res.send({ message: 'Welcome to DevNexus API' });
-// });
+// Serve /uploads/* publicly (e.g. http://localhost:5000/uploads/avatars/xxx.png)
+app.use('/uploads', express.static(path.join(__dirname, '..', 'uploads')));
 
-app.use('/api/users', authRoutes);
+app.get('/health', (_req, res) => res.json({ ok: true }));
 
-// Example route placeholder
-// app.use('/api/auth', require('./routes/auth'));
+app.use('/api/users', require('./routes/UserRoutes'));
+app.use('/api/posts', require('./routes/PostRoutes'));
+app.use('/api/notifications', require('./routes/NotificationRoutes'));
 
-// Error handler
-app.use((err, req, res, next) => {
+app.use((err, _req, res, _next) => {
   console.error(err);
   res.status(err.status || 500).json({ message: err.message || 'Server error' });
 });

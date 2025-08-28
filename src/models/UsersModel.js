@@ -1,75 +1,37 @@
 const mongoose = require('mongoose');
 const bcrypt = require('bcrypt');
 
-const SALT_ROUNDS = 12;
+const UserSchema = new mongoose.Schema(
+  {
+    name: { type: String, required: true, trim: true },
+    username: { type: String, required: true, unique: true, lowercase: true, trim: true },
+    email: { type: String, required: true, unique: true, lowercase: true, trim: true },
+    passwordHash: { type: String, required: true }, // will hold hashed password
+    roles: { type: [String], default: ['user'] },
+    bio: { type: String, default: '' },
+    skills: { type: [String], default: [] },
+    avatarUrl: { type: String, default: '' },
+    coverUrl: { type: String, default: null },
+    socialLinks: { type: Object, default: {} },
+    followers: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+    following: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
+    followersCount: { type: Number, default: 0 },
+    followingCount: { type: Number, default: 0 },
 
-const UserSchema = new mongoose.Schema({
-  name: {
-    type: String,
-    required: true,
-    trim: true,
-    minlength: 2,
-    maxlength: 50,
   },
-  username: {
-    type: String,
-    unique: true,
-    required: true,
-    trim: true,
-    minlength: 3,
-    maxlength: 30,
-    match: [/^[a-zA-Z0-9_-]+$/, 'Username can only contain letters, numbers, underscores, and hyphens'],
-  },
-  email: {
-    type: String,
-    unique: true,
-    required: true,
-    lowercase: true,
-    trim: true,
-    match: [/.+\@.+\..+/, 'Please enter a valid email address'],
-  },
-  passwordHash: {
-    type: String,
-    required: true,
-  },
-  bio: {
-    type: String,
-    maxlength: 300,
-  },
-  skills: {
-    type: [String],
-    default: [],
-  },
-  avatarUrl: {
-    type: String,
-    default: '',  // Can add default avatar URL here if desired
-  },
-  socialLinks: {
-    github: { type: String, default: '' },
-    linkedin: { type: String, default: '' },
-    twitter: { type: String, default: '' },
-  },
-  roles: {
-    type: [String],
-    default: ['user'], // e.g., 'user', 'admin'
-  }
-}, { timestamps: true });
+  { timestamps: true }
+);
 
-// Hash password before saving if modified
+// hash passwordHash if modified
 UserSchema.pre('save', async function (next) {
   if (!this.isModified('passwordHash')) return next();
-  try {
-    const hashed = await bcrypt.hash(this.passwordHash, SALT_ROUNDS);
-    this.passwordHash = hashed;
-    next();
-  } catch (err) {
-    next(err);
-  }
+  const salt = await bcrypt.genSalt(10);
+  this.passwordHash = await bcrypt.hash(this.passwordHash, salt);
+  next();
 });
 
-// Compare password method for authentication
-UserSchema.methods.comparePassword = async function (candidatePassword) {
-  return bcrypt.compare(candidatePassword, this.passwordHash);
+UserSchema.methods.comparePassword = function (plain) {
+  return bcrypt.compare(plain, this.passwordHash);
 };
 
 module.exports = mongoose.model('User', UserSchema);

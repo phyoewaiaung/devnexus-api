@@ -2,47 +2,51 @@ require('dotenv').config();
 const mongoose = require('mongoose');
 const User = require('./models/UsersModel');
 
-async function seedDefaultUser() {
-  const { DATABASE_USER, DATABASE_PASSWORD, MONGO_URI } = process.env;
-  let mongoUri;
+const MONGO_URI = process.env.MONGO_URI;
 
-  if (MONGO_URI) {
-    mongoUri = MONGO_URI;
-  } else if (DATABASE_USER && DATABASE_PASSWORD) {
-    mongoUri = `mongodb+srv://${encodeURIComponent(DATABASE_USER)}:${encodeURIComponent(DATABASE_PASSWORD)}@cluster0.f7hhyvb.mongodb.net/?retryWrites=true&w=majority`;
-  } else {
-    console.error('\u274c MongoDB connection info is missing from environment variables.');
+(async () => {
+  if (!MONGO_URI) {
+    console.error('Missing MONGO_URI in .env');
     process.exit(1);
   }
 
-  await mongoose.connect(mongoUri, {
-    useNewUrlParser: true,
-    useUnifiedTopology: true,
-    serverSelectionTimeoutMS: 5000,
-  });
+  await mongoose.connect(MONGO_URI);
+  console.log('Connected to MongoDB');
 
-  try {
-    const email = 'admin@example.com';
-    const existing = await User.findOne({ email });
+  const email = process.env.DEFAULT_ADMIN_EMAIL || 'admin@example.com';
+  const username = (process.env.DEFAULT_ADMIN_USERNAME || 'admin').toLowerCase();
+  const name = process.env.DEFAULT_ADMIN_NAME || 'Admin';
+  const password = process.env.DEFAULT_ADMIN_PASSWORD || 'Admin1234';
 
-    if (existing) {
-      console.log('Default user already exists');
-    } else {
-      const user = new User({
-        name: 'Admin User',
-        username: 'admin',
-        email,
-        passwordHash: 'password123',
-        roles: ['admin'],
-      });
-      await user.save();
-      console.log('Default user created');
-    }
-  } catch (err) {
-    console.error('Seed error:', err);
-  } finally {
-    await mongoose.connection.close();
+  let user = await User.findOne({ $or: [{ email }, { username }] });
+
+  if (!user) {
+    user = new User({
+      name,
+      email: email.toLowerCase(),
+      username,
+      passwordHash: password,
+      roles: ['admin'],
+      bio: 'Admin',
+    });
+    await user.save();
+    console.log('Default admin created.');
+  } else {
+    user.passwordHash = password; // will be hashed
+    await user.save();
+    console.log('Default admin password reset.');
   }
-}
 
-seedDefaultUser();
+  console.log('--- Admin Credentials ---');
+  console.log(`Email:    ${email}`);
+  console.log(`Username: ${username}`);
+  console.log(`Password: ${password}`);
+  console.log('-------------------------');
+
+  await mongoose.connection.close();
+  console.log('Done.');
+})().catch(async (e) => {
+  console.error(e);
+  await mongoose.connection.close();
+  process.exit(1);
+});
