@@ -1,20 +1,98 @@
+const path = require('path');
 const Post = require('../models/PostModel');
 const User = require('../models/UsersModel');
 const { getIO } = require('../socket');
 const Notification = require('../models/NotificationModel');
 
-
-// POST /api/posts
-exports.create = async (req, res, next) => {
-  try {
-    const { text } = req.body;
-    if (!text || !text.trim()) return res.status(400).json({ message: 'Text required' });
-    const post = await Post.create({ author: req.user.id, text: text.trim() });
-    res.status(201).json({ post });
-  } catch (e) { next(e); }
+/** Map common aliases to our allowed names */
+const LANG_ALIAS = {
+  js: 'javascript',
+  ts: 'typescript',
+  cplusplus: 'cpp',
+  shell: 'bash',
+  sh: 'bash',
+  md: 'markdown',
+  yml: 'yaml'
 };
 
+function extractLanguages(markdown = '') {
+  const langs = new Set();
+  const re = /```(\w+)[^\n]*\n[\s\S]*?```/g; // capture ```lang ... ```
+  let m;
+  while ((m = re.exec(markdown)) !== null) {
+    const raw = (m[1] || '').toLowerCase();
+    const normalized = LANG_ALIAS[raw] || raw;
+    if (Post.ALLOWED_LANGS.includes(normalized)) langs.add(normalized);
+  }
+  return [...langs];
+}
+
+function normalizeTags(input) {
+  if (!input) return [];
+  if (Array.isArray(input)) {
+    return input.map(s => String(s).trim().toLowerCase()).filter(Boolean);
+  }
+  if (typeof input === 'string') {
+    return input.split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+  }
+  return [];
+}
+
+// -----------------------------
+// POST /api/posts   (multipart: text + optional image + optional tags)
+// -----------------------------
+exports.create = async (req, res, next) => {
+  try {
+    const { text = '', tags } = req.body;
+    const trimmed = text.trim();
+
+    if (!trimmed && !req.file) {
+      return res.status(400).json({ message: 'Text or image required' });
+    }
+    if (trimmed.length > 5000) {
+      return res.status(400).json({ message: 'Text exceeds 5,000 characters' });
+    }
+
+    // Build image (if uploaded by multer)
+    let image = null;
+    if (req.file) {
+      const relPath = path.join('uploads', 'posts', req.file.filename).replace(/\\/g, '/');
+      const url = `${req.protocol}://${req.get('host')}/${relPath}`;
+      image = { url, mimeType: req.file.mimetype, size: req.file.size };
+    }
+
+    // Tags & languages
+    const normalizedTags = normalizeTags(tags);
+    const languages = extractLanguages(trimmed);
+
+    // if user tagged a known language, include it in languages as well
+    for (const t of normalizedTags) {
+      if (Post.ALLOWED_LANGS.includes(t) && !languages.includes(t)) languages.push(t);
+    }
+
+    const post = await Post.create({
+      author: req.user.id,
+      text: trimmed || '',
+      image,
+      tags: normalizedTags,
+      languages
+    });
+
+    res.status(201).json({ post });
+  } catch (e) {
+    if (e && e.code === 'LIMIT_FILE_SIZE') {
+      return res.status(400).json({ message: 'Image must be less than 5MB.' });
+    }
+    if (e && e.code === 'LIMIT_UNEXPECTED_FILE') {
+      return res.status(400).json({ message: 'Please select an image file.' });
+    }
+    next(e);
+  }
+};
+
+// -----------------------------
 // DELETE /api/posts/:id
+// -----------------------------
 exports.remove = async (req, res, next) => {
   try {
     const p = await Post.findOneAndDelete({ _id: req.params.id, author: req.user.id });
@@ -23,13 +101,23 @@ exports.remove = async (req, res, next) => {
   } catch (e) { next(e); }
 };
 
-// GET /api/posts/feed?page=1&limit=10
+// -----------------------------
+// GET /api/posts/feed?page=1&limit=10&lang=js,python&tag=react
+// -----------------------------
 exports.feed = async (req, res, next) => {
   try {
     const page = Math.max(parseInt(req.query.page || '1', 10), 1);
     const limit = Math.min(Math.max(parseInt(req.query.limit || '10', 10), 1), 50);
 
-    const posts = await Post.find({})
+    const q = {};
+    if (req.query.lang) {
+      q.languages = { $in: String(req.query.lang).toLowerCase().split(',').filter(Boolean) };
+    }
+    if (req.query.tag) {
+      q.tags = { $in: String(req.query.tag).toLowerCase().split(',').filter(Boolean) };
+    }
+
+    const posts = await Post.find(q)
       .sort({ createdAt: -1 })
       .skip((page - 1) * limit)
       .limit(limit)
@@ -42,7 +130,9 @@ exports.feed = async (req, res, next) => {
   } catch (e) { next(e); }
 };
 
+// -----------------------------
 // GET /api/posts/user/:username
+// -----------------------------
 exports.byUser = async (req, res, next) => {
   try {
     const username = String(req.params.username || '').toLowerCase();
@@ -60,7 +150,9 @@ exports.byUser = async (req, res, next) => {
   } catch (e) { next(e); }
 };
 
+// -----------------------------
 // POST /api/posts/:id/like  (toggle)
+// -----------------------------
 exports.toggleLike = async (req, res, next) => {
   try {
     const id = req.params.id;
@@ -71,26 +163,22 @@ exports.toggleLike = async (req, res, next) => {
       ? { $pull: { likes: uid }, $inc: { likesCount: -1 } }
       : { $addToSet: { likes: uid }, $inc: { likesCount: 1 } };
 
-    // fetch author so we can notify
     const post = await Post.findByIdAndUpdate(id, update, {
       new: true,
       select: 'likesCount author',
     });
     if (!post) return res.status(404).json({ message: 'Post not found' });
 
-    // respond immediately
     res.json({ likesCount: post.likesCount, liked: !has });
 
-    // fire-and-forget side effects (notification + realtime)
     (async () => {
       try {
         const recipientId = String(post.author);
-        if (recipientId === String(uid)) return; // no self-notifs
+        if (recipientId === String(uid)) return;
 
         const io = getIO();
 
         if (has) {
-          // UNLIKE → remove like notification + tell client to remove
           await Notification.deleteOne({
             recipient: recipientId,
             actor: uid,
@@ -104,7 +192,6 @@ exports.toggleLike = async (req, res, next) => {
             actorId: String(uid),
           });
         } else {
-          // LIKE → upsert like notification + emit the new notif
           const notif = await Notification.findOneAndUpdate(
             { recipient: recipientId, actor: uid, post: id, type: 'like' },
             { $setOnInsert: { read: false } },
@@ -117,23 +204,18 @@ exports.toggleLike = async (req, res, next) => {
             postId: String(id),
             read: notif.read,
             createdAt: notif.createdAt,
-            actor: notif.actor, // { _id, name, username, avatarUrl }
+            actor: notif.actor,
           });
         }
-
-        // OPTIONAL: also emit updated unread count
-        // const unread = await Notification.countDocuments({ recipient: recipientId, read: false });
-        // io.to(recipientId).emit('notification:count', { unread });
-
-      } catch (e) { console.log(e) }
+      } catch (e) { console.log(e); }
     })();
 
   } catch (e) { next(e); }
 };
 
-
+// -----------------------------
 // POST /api/posts/:id/comments
-// POST /api/posts/:id/comments
+// -----------------------------
 exports.addComment = async (req, res, next) => {
   try {
     const { text } = req.body;
@@ -145,21 +227,19 @@ exports.addComment = async (req, res, next) => {
       { new: true }
     )
       .populate({ path: 'comments.author', select: 'name username avatarUrl' })
-      .select('author comments'); // include author to notify
+      .select('author comments');
 
     if (!post) return res.status(404).json({ message: 'Post not found' });
 
     const newComment = post.comments[post.comments.length - 1];
 
-    // respond immediately
     res.status(201).json({ comments: post.comments });
 
-    // fire-and-forget side effects (notification + realtime)
     (async () => {
       try {
         const recipientId = String(post.author);
         const actorId = String(req.user.id);
-        if (recipientId === actorId) return; // no self-notifs
+        if (recipientId === actorId) return;
 
         const notif = await Notification.create({
           recipient: recipientId,
@@ -182,18 +262,15 @@ exports.addComment = async (req, res, next) => {
           actor: notif.actor,
         });
 
-        // OPTIONAL unread count
-        // const unread = await Notification.countDocuments({ recipient: recipientId, read: false });
-        // io.to(recipientId).emit('notification:count', { unread });
-
-      } catch { }
+      } catch { /* ignore */ }
     })();
 
   } catch (e) { next(e); }
 };
 
-
+// -----------------------------
 // GET /api/posts/:id/comments
+// -----------------------------
 exports.listComments = async (req, res, next) => {
   try {
     const post = await Post.findById(req.params.id)
@@ -202,4 +279,40 @@ exports.listComments = async (req, res, next) => {
     if (!post) return res.status(404).json({ message: 'Post not found' });
     res.json({ comments: post.comments });
   } catch (e) { next(e); }
+};
+
+
+exports.getById = async (req, res, next) => {
+  try {
+    const id = req.params.id;
+
+    const post = await Post.findById(id)
+      .populate([
+        { path: 'author', select: 'name username avatarUrl' },
+        { path: 'comments.author', select: 'name username avatarUrl' },
+      ]);
+
+    if (!post) return res.status(404).json({ message: 'Post not found' });
+
+    const obj = post.toObject();
+    obj.likesCount = typeof post.likesCount === 'number'
+      ? post.likesCount
+      : Array.isArray(post.likes) ? post.likes.length : 0;
+
+    obj.commentsCount = Array.isArray(post.comments) ? post.comments.length : 0;
+
+    obj.liked = false;
+    if (req.user?.id) {
+      obj.liked = !!(await Post.exists({ _id: id, likes: req.user.id }));
+    }
+
+    obj.canDelete = String(post.author?._id) === String(req.user?.id);
+
+    res.json({ post: obj });
+  } catch (e) {
+    if (e?.name === 'CastError') {
+      return res.status(404).json({ message: 'Post not found' });
+    }
+    next(e);
+  }
 };

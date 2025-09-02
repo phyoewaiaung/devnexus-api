@@ -6,7 +6,7 @@ const fs = require('fs');
 exports.getPublic = async (req, res, next) => {
   try {
     const u = await User.findOne({ username: req.params.username.toLowerCase() })
-      .select('name username bio skills avatarUrl coverUrl socialLinks roles followersCount followingCount createdAt');
+      .select('name username bio skills avatarUrl coverUrl followers socialLinks roles followersCount followingCount createdAt');
     if (!u) return res.status(404).json({ message: 'User not found' });
     res.json({ user: u });
   } catch (e) { next(e); }
