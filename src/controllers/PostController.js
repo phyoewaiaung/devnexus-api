@@ -130,6 +130,49 @@ exports.feed = async (req, res, next) => {
   } catch (e) { next(e); }
 };
 
+
+exports.followingFeed = async (req, res, next) => {
+  try {
+    const page = Math.max(parseInt(req.query.page || '1', 10), 1);
+    const limit = Math.min(Math.max(parseInt(req.query.limit || '10', 10), 1), 50);
+
+    // 1) Load who the user follows
+    const me = await User.findById(req.user.id).select('following');
+    const followingIds = (me?.following || []).map(String);
+
+    // If not following anyone, short-circuit
+    if (!followingIds.length) {
+      return res.json({ posts: [], page, limit });
+    }
+
+    // 2) Build query (reuse your lang/tag filters)
+    const q = { author: { $in: followingIds } };
+
+    if (req.query.lang) {
+      q.languages = {
+        $in: String(req.query.lang).toLowerCase().split(',').filter(Boolean)
+      };
+    }
+    if (req.query.tag) {
+      q.tags = {
+        $in: String(req.query.tag).toLowerCase().split(',').filter(Boolean)
+      };
+    }
+
+    // 3) Fetch posts
+    const posts = await Post.find(q)
+      .sort({ createdAt: -1 })
+      .skip((page - 1) * limit)
+      .limit(limit)
+      .populate([
+        { path: 'author', select: 'name username avatarUrl' },
+        { path: 'comments.author', select: 'name username avatarUrl' },
+      ]);
+
+    res.json({ posts, page, limit });
+  } catch (e) { next(e); }
+};
+
 // -----------------------------
 // GET /api/posts/user/:username
 // -----------------------------

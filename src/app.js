@@ -1,16 +1,13 @@
 const express = require('express');
 const cookieParser = require('cookie-parser');
 const path = require('path');
-const cors = require('cors'); // ✅ import cors
+const cors = require('cors'); // 
 
 const app = express();
 
 app.use(cors({
-  origin: [
-    'http://localhost:5173',
-    'https://devnexus-ui-1hrz.vercel.app',
-  ],
-  credentials: true,
+  origin: true,
+  credentials: true
 }));
 
 app.use(express.json());

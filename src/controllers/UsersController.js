@@ -3,7 +3,7 @@ const User = require('../models/UsersModel');
 
 const signAccess = (user) =>
   jwt.sign(
-    { id: user._id, username: user.username, roles: user.roles },
+    { id: user._id, username: user.username, roles: user.roles, email: user.email },
     process.env.JWT_ACCESS_SECRET,
     { expiresIn: process.env.ACCESS_TOKEN_EXPIRY || '15m' }
   );

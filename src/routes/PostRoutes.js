@@ -4,7 +4,8 @@ const auth = require('../middleware/authenticate');
 const ctrl = require('../controllers/PostController');
 const { uploadPostImage } = require('../middleware/uploadPostImage');
 
-router.get('/feed', ctrl.feed);
+router.get('/feed', auth, ctrl.feed);
+router.get('/feed/following', auth, ctrl.followingFeed);
 router.get('/user/:username', ctrl.byUser);
 router.post('/', auth, uploadPostImage.single('image'), ctrl.create);
 
