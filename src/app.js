@@ -20,6 +20,7 @@ app.get('/health', (_req, res) => res.json({ ok: true }));
 app.use('/api/users', require('./routes/UserRoutes'));
 app.use('/api/posts', require('./routes/PostRoutes'));
 app.use('/api/notifications', require('./routes/NotificationRoutes'));
+app.use('/api/chats', require('./routes/ChatRoutes'));
 
 // Error handler
 app.use((err, _req, res, _next) => {

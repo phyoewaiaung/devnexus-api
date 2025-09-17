@@ -1,8 +1,9 @@
+// server.js (or index.js)
 require('dotenv').config();
 const mongoose = require('mongoose');
-const http = require('http');                // ✅ add
+const http = require('http');
 const app = require('./app');
-const { initSocket } = require('./socket');  // ✅ add
+const { initSocket } = require('./socket');
 
 const PORT = process.env.PORT || 5000;
 const MONGO_URI = process.env.MONGO_URI;
@@ -17,8 +18,9 @@ mongoose.set('strictQuery', true);
 mongoose.connect(MONGO_URI)
   .then(() => {
     console.log('Connected to MongoDB');
-    const server = http.createServer(app);   // ✅ wrap express
-    initSocket(server);                      // ✅ init io
+    const server = http.createServer(app);
+    const io = initSocket(server);   // ✅ get instance
+    app.set('io', io);               // ✅ allow controllers to emit
     server.listen(PORT, () => console.log(`Server http://localhost:${PORT}`));
   })
   .catch((err) => {
