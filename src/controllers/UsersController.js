@@ -46,11 +46,31 @@ exports.register = async (req, res, next) => {
       skills: parseSkills(skills),
       avatarUrl: avatarUrl || '',
       socialLinks: parseLinks(socialLinks),
-      roles: ['user'], // locked
+      roles: ['user'],
+      theme: ['light', 'dark'].includes(theme) ? theme : 'light',
     })
     await user.save();
 
     return res.status(201).json({ message: 'Registered' });
+  } catch (e) {
+    next(e);
+  }
+};
+
+//theme
+exports.updateTheme = async (req, res, next) => {
+  try {
+    const { theme } = req.body;
+    if (!['light', 'dark'].includes(theme)) {
+      return res.status(400).json({ message: 'Invalid theme' });
+    }
+    const user = await User.findByIdAndUpdate(
+      req.user.id,
+      { theme },
+      { new: true, select: '_id username theme' }
+    );
+    if (!user) return res.status(404).json({ message: 'Not found' });
+    res.json({ message: 'Theme updated', theme: user.theme });
   } catch (e) {
     next(e);
   }

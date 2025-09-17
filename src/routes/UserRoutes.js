@@ -17,6 +17,7 @@ router.post('/me/cover', auth, uploadCover.single('cover'), profile.uploadCover)
 // profile
 router.get('/profile/:username', profile.getPublic);  // public profile by username
 router.patch('/me', auth, profile.updateMe);          // update my profile
+router.patch('/me/theme', auth, ctrl.updateTheme);
 
 // follow
 router.post('/follow/:username', auth, profile.follow);

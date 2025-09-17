@@ -17,6 +17,11 @@ const UserSchema = new mongoose.Schema(
     following: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
     followersCount: { type: Number, default: 0 },
     followingCount: { type: Number, default: 0 },
+    theme: {
+      type: String,
+      enum: ['light', 'dark'],
+      default: 'light',
+    },
 
   },
   { timestamps: true }
