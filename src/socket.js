@@ -1,32 +1,26 @@
 // socket.js
 const { Server } = require('socket.io');
 const jwt = require('jsonwebtoken');
-const mongoose = require('mongoose');
+const Notification = require('./models/NotificationModel'); // <- add
+let io = null;
 
-const Conversation = require('./models/ConversationModel'); // ensure path
-const Message = require('./models/MessageModel');           // ensure path
+/* Track online sockets per user */
+const userSockets = new Map(); // userId -> Set<socketId>
 
-/* =========================
-   Globals / Presence State
-========================= */
-let io;
-
-// userId -> { sockets:Set<string>, email, firstConnectedAt:Date, lastActivity:Date }
-const connectedUsers = new Map();
-// userId -> Timeout
-const offlineTimers = new Map();
-const PRESENCE_GRACE_MS = 4000;
-
-/* =========================
-   Cookie & Token helpers
-========================= */
+/* -----------------------------
+   Token helpers (cookie/header)
+-------------------------------- */
 function getCookieMap(cookieStr = '') {
-    return cookieStr.split(';').reduce((map, part) => {
-        const [k, ...rest] = part.split('=');
-        if (!k || !rest.length) return map;
-        map[k.trim()] = decodeURIComponent(rest.join('=').trim());
-        return map;
-    }, {});
+    return cookieStr
+        .split(';')
+        .map((p) => p.trim())
+        .filter(Boolean)
+        .reduce((acc, part) => {
+            const [k, ...rest] = part.split('=');
+            if (!k || !rest.length) return acc;
+            acc[k] = decodeURIComponent(rest.join('=').trim());
+            return acc;
+        }, {});
 }
 
 function extractToken(socket) {
@@ -34,325 +28,159 @@ function extractToken(socket) {
     const fromAuth = hs.auth?.token;
     const fromHeader = hs.headers?.authorization;
     const cookies = getCookieMap(hs.headers?.cookie || '');
-    const fromCookie = cookies.token || cookies.accessToken || cookies.jwt || cookies['access_token'];
-    const raw = fromAuth || fromHeader || fromCookie;
+    const fromCookie =
+        cookies.token || cookies.accessToken || cookies.jwt || cookies['access_token'];
+
+    let raw = fromAuth || fromHeader || fromCookie;
     if (!raw) return null;
-    return raw.startsWith('Bearer ') ? raw.slice(7) : raw;
+    if (typeof raw === 'string' && raw.startsWith('Bearer ')) raw = raw.slice(7);
+    return typeof raw === 'string' && raw.length ? raw : null;
 }
 
-/* =========================
-   Auth middleware
-========================= */
+/* -----------------------------
+   Auth middleware (JWT verify)
+-------------------------------- */
 function authenticateSocket(socket, next) {
     try {
         const token = extractToken(socket);
         if (!token) return next(new Error('Authentication token required'));
 
-        const payload = jwt.verify(token, process.env.JWT_ACCESS_SECRET);
-        const userId = String(payload.id || payload._id || payload.sub || '');
+        const secret = process.env.JWT_ACCESS_SECRET || process.env.JWT_SECRET;
+        if (!secret) return next(new Error('Server misconfigured: missing JWT secret'));
+
+        const payload = jwt.verify(token, secret);
+        const userId = String(payload.id || payload._id || payload.sub || payload.userId || '');
         if (!userId) return next(new Error('Invalid token payload'));
 
         socket.user = {
             id: userId,
             email: payload.email || '',
-            username: payload.username || '',
+            name: payload.username || payload.name || '',
             roles: payload.roles || [],
         };
+
         return next();
     } catch (err) {
-        if (err.name === 'TokenExpiredError') return next(new Error('Token expired'));
-        if (err.name === 'JsonWebTokenError') return next(new Error('Invalid token'));
-        return next(new Error('Authentication failed'));
+        const msg =
+            err.name === 'TokenExpiredError'
+                ? 'Token expired'
+                : err.name === 'JsonWebTokenError'
+                    ? 'Invalid token'
+                    : 'Authentication failed';
+        return next(new Error(msg));
     }
 }
 
-/* =========================
-   Room / Membership utils
-========================= */
-const asId = (v) => new mongoose.Types.ObjectId(String(v));
-
-async function userIsInConversation(userId, conversationId) {
-    if (!mongoose.isValidObjectId(conversationId)) return false;
-    const c = await Conversation.exists({
-        _id: conversationId,
-        'participants.user': asId(userId),
-    });
-    return !!c;
+/* -----------------------------
+   Helpers
+-------------------------------- */
+function userRoom(userId) {
+    return `user:${userId}`;
 }
 
-async function joinAllUserConversations(socket) {
-    const convs = await Conversation.find({ 'participants.user': socket.user.id }).select('_id');
-    convs.forEach((c) => socket.join(String(c._id)));
+async function emitUnreadCount(userId) {
+    try {
+        const unread = await Notification.countDocuments({ recipient: userId, read: false });
+        io.to(userRoom(userId)).emit('notification:count', { unread });
+    } catch (e) {
+        console.error('[socket] failed to emit unread count:', e?.message || e);
+    }
 }
 
-/* =========================
-   Simple rate limiter
-========================= */
-// token bucket: 1 msg / 500ms, burst 5
-const rateState = new Map();
-const MSG_INTERVAL_MS = 500;
-const MSG_BURST = 5;
-
-function canSendMessage(userId) {
-    const now = Date.now();
-    const s = rateState.get(userId) || { tokens: MSG_BURST, last: now };
-    const delta = now - s.last;
-    const refill = Math.floor(delta / MSG_INTERVAL_MS);
-    if (refill > 0) {
-        s.tokens = Math.min(MSG_BURST, s.tokens + refill);
-        s.last = now;
+/* Manage userSockets map */
+function addUserSocket(userId, socketId) {
+    let set = userSockets.get(userId);
+    if (!set) {
+        set = new Set();
+        userSockets.set(userId, set);
     }
-    if (s.tokens <= 0) {
-        rateState.set(userId, s);
-        return false;
-    }
-    s.tokens -= 1;
-    rateState.set(userId, s);
-    return true;
+    set.add(socketId);
 }
 
-/* =========================
-   Connection handler
-========================= */
-function handleConnection(socket) {
-    const { id: socketId } = socket;
-    const { id: userId, email } = socket.user;
-
-    // Personal room for direct emits (notifications/presence)
-    socket.join(userId);
-
-    // Ensure presence entry with Set of sockets
-    let entry = connectedUsers.get(userId);
-    if (!entry) {
-        entry = { sockets: new Set(), email, firstConnectedAt: new Date(), lastActivity: new Date() };
-        connectedUsers.set(userId, entry);
-    }
-    entry.sockets.add(socketId);
-    entry.email = email;
-    entry.lastActivity = new Date();
-
-    // Cancel any pending offline broadcast for this user
-    if (offlineTimers.has(userId)) {
-        clearTimeout(offlineTimers.get(userId));
-        offlineTimers.delete(userId);
-    }
-
-    // Auto-join all conversation rooms for this user
-    joinAllUserConversations(socket).catch((e) =>
-        console.error('[socket] joinAllUserConversations error:', e.message)
-    );
-
-    const firstConnection = entry.sockets.size === 1;
-    if (firstConnection) {
-        socket.broadcast.emit('presence:update', { userId, online: true });
-    }
-
-    console.log('[socket] User connected', { userId, socketId, totalUsers: connectedUsers.size });
-
-    // Ack + presence snapshot to the connecting client
-    socket.emit('connected', { message: 'Connected', userId, at: new Date() });
-    socket.emit('presence:state', { onlineUserIds: Array.from(connectedUsers.keys()) });
-
-    /* -------- Activity ping -------- */
-    socket.on('user_activity', () => {
-        const u = connectedUsers.get(userId);
-        if (u) u.lastActivity = new Date();
-    });
-
-    /* -------- Room join/leave (generic) -------- */
-    socket.on('join_room', async (roomId) => {
-        try {
-            if (!roomId || typeof roomId !== 'string') return;
-            if (mongoose.isValidObjectId(roomId)) {
-                const ok = await userIsInConversation(userId, roomId);
-                if (!ok) return socket.emit('error', { message: 'Forbidden: not a participant' });
-            }
-            socket.join(roomId);
-            socket.emit('room_joined', { roomId });
-        } catch (e) {
-            console.error('[socket] join_room error:', e);
-            socket.emit('error', { message: 'Failed to join room' });
-        }
-    });
-
-    socket.on('leave_room', (roomId) => {
-        if (roomId && typeof roomId === 'string') {
-            socket.leave(roomId);
-            socket.emit('room_left', { roomId });
-        }
-    });
-
-    /* -------- Chat events (conversation-scoped) -------- */
-    socket.on('chat:send', async (payload, cb) => {
-        try {
-            const { conversationId, text = '', attachments = [] } = payload || {};
-            if (!conversationId || (!text && !attachments?.length)) {
-                return cb?.({ ok: false, error: 'Invalid payload' });
-            }
-            if (!canSendMessage(userId)) {
-                return cb?.({ ok: false, error: 'Rate limited. Slow down.' });
-            }
-            const isMember = await userIsInConversation(userId, conversationId);
-            if (!isMember) return cb?.({ ok: false, error: 'Forbidden' });
-
-            const msg = await Message.create({
-                conversation: conversationId,
-                sender: userId,
-                text: String(text).trim(),
-                attachments,
-            });
-
-            await Conversation.updateOne(
-                { _id: conversationId },
-                { $set: { lastMessageAt: new Date() } }
-            );
-
-            const msgObj = {
-                ...msg.toObject(),
-                sender: { _id: userId, email }, // light sender
-            };
-
-            const payloadOut = { conversationId, message: msgObj };
-
-            // Emit to everyone in room (including sender) to avoid "missing own message"
-            io.to(String(conversationId)).emit('message:new', payloadOut);
-
-            cb?.({ ok: true, messageId: String(msg._id) });
-        } catch (e) {
-            console.error('[socket] chat:send error', e);
-            cb?.({ ok: false, error: 'Failed to send' });
-        }
-    });
-
-    socket.on('chat:typing', async ({ conversationId, isTyping }) => {
-        try {
-            if (!conversationId) return;
-            const isMember = await userIsInConversation(userId, conversationId);
-            if (!isMember) return;
-            socket.to(String(conversationId)).emit('typing', { conversationId, userId, isTyping: !!isTyping });
-        } catch (e) {
-            console.error('[socket] chat:typing error', e);
-        }
-    });
-
-    socket.on('chat:read', async ({ conversationId }) => {
-        try {
-            if (!conversationId) return;
-            const isMember = await userIsInConversation(userId, conversationId);
-            if (!isMember) return;
-
-            const now = new Date();
-            await Conversation.updateOne(
-                { _id: conversationId, 'participants.user': asId(userId) },
-                { $set: { 'participants.$.lastReadAt': now } }
-            );
-            await Message.updateMany(
-                { conversation: conversationId, readBy: { $ne: asId(userId) } },
-                { $addToSet: { readBy: asId(userId) } }
-            );
-
-            socket.to(String(conversationId)).emit('message:read', { conversationId, userId, at: now });
-        } catch (e) {
-            console.error('[socket] chat:read error', e);
-        }
-    });
-
-    socket.on('chat:joinAll', async (cb) => {
-        try {
-            await joinAllUserConversations(socket);
-            cb?.({ ok: true });
-        } catch (e) {
-            cb?.({ ok: false, error: e.message });
-        }
-    });
-
-    /* -------- Backward-compatible generic messaging -------- */
-    socket.on('send_message', (data) => {
-        try {
-            const { roomId, message, type = 'text' } = data || {};
-            if (!roomId || !message) return socket.emit('error', { message: 'Invalid message data' });
-
-            const payload = {
-                id: Date.now().toString(),
-                userId,
-                userEmail: email,
-                message,
-                type,
-                timestamp: new Date(),
-                roomId,
-            };
-            socket.to(roomId).emit('new_message', payload);
-            socket.emit('message_sent', { messageId: payload.id, roomId });
-        } catch (err) {
-            console.error('[socket] send_message error:', err);
-            socket.emit('error', { message: 'Failed to send message' });
-        }
-    });
-
-    /* -------- Presence: disconnect (multi-socket safe with grace) -------- */
-    socket.on('disconnect', (reason) => {
-        const entry = connectedUsers.get(userId);
-
-        if (entry && entry.sockets instanceof Set) {
-            entry.sockets.delete(socketId);
-            entry.lastActivity = new Date();
-
-            if (entry.sockets.size === 0) {
-                // Delay offline in case of quick reconnect
-                const t = setTimeout(() => {
-                    const latest = connectedUsers.get(userId);
-                    if (!latest || latest.sockets.size === 0) {
-                        connectedUsers.delete(userId);
-                        socket.broadcast.emit('presence:update', { userId, online: false });
-                    }
-                    offlineTimers.delete(userId);
-                }, PRESENCE_GRACE_MS);
-                offlineTimers.set(userId, t);
-            }
-        }
-
-        console.log('[socket] User disconnected', {
-            userId, reason, socketId,
-            remainingSockets: entry?.sockets?.size || 0,
-            distinctUsers: connectedUsers.size
-        });
-    });
-
-    socket.on('error', (err) => {
-        console.error(`[socket] Socket error for user ${userId}:`, err);
-    });
+function removeUserSocket(userId, socketId) {
+    const set = userSockets.get(userId);
+    if (!set) return;
+    set.delete(socketId);
+    if (set.size === 0) userSockets.delete(userId);
 }
 
-/* =========================
-   Init & Utilities
-========================= */
+/* Public helpers to inspect/emit */
+function getOnlineUserIds() {
+    return Array.from(userSockets.keys());
+}
+
+function getOnlineUserCount() {
+    return userSockets.size;
+}
+
+function getUserSocketIds(userId) {
+    return Array.from(userSockets.get(String(userId)) || []);
+}
+
+function emitToUser(userId, event, payload) {
+    // rooms already group all sockets for that user
+    io.to(userRoom(String(userId))).emit(event, payload);
+}
+
+function emitToUsers(userIds = [], event, payload) {
+    const rooms = userIds.map((id) => userRoom(String(id)));
+    if (rooms.length) io.to(rooms).emit(event, payload);
+}
+
+/* -----------------------------
+   Init & basic lifecycle logs
+-------------------------------- */
 function initSocket(httpServer) {
     const allowedOrigins = [
         'http://localhost:5173',
         'http://localhost:3000',
         'http://localhost:4173',
-        /^http:\/\/192\.168\.\d+\.\d+:\d+$/,
-        /^http:\/\/10\.\d+\.\d+\.\d+:\d+$/,
-        /^http:\/\/172\.(1[6-9]|2\d|3[0-1])\.\d+\.\d+:\d+$/,
         process.env.WEB_ORIGIN,
         process.env.FRONTEND_URL,
+        process.env.CLIENT_URL,
     ].filter(Boolean);
 
     io = new Server(httpServer, {
         cors: { origin: allowedOrigins, credentials: true, methods: ['GET', 'POST'] },
-        pingTimeout: 60000,
-        pingInterval: 25000,
-        upgradeTimeout: 30000,
-        maxHttpBufferSize: 1e6,
-        transports: ['websocket', 'polling'],
-        allowEIO3: true,
+        path: '/socket.io/',
+        serveClient: false,
     });
 
     io.use(authenticateSocket);
-    io.on('connection', handleConnection);
-    io.on('error', (err) => console.error('[socket] Server error:', err));
 
-    console.log('[socket] Socket.IO initialized with allowed origins:', allowedOrigins);
+    io.on('connection', async (socket) => {
+        const userId = socket.user?.id;
+        if (userId) {
+            socket.join(userRoom(userId));
+            addUserSocket(userId, socket.id);
+            console.log(`[socket] user ${userId} connected (socket ${socket.id}) — sockets:`, getUserSocketIds(userId).length);
+
+            // initial unread count
+            await emitUnreadCount(userId);
+
+            // (optional) let clients know who is online
+            io.emit('online:users', { users: getOnlineUserIds() });
+        } else {
+            console.warn('[socket] connected socket missing user');
+        }
+
+        socket.on('disconnect', (reason) => {
+            if (userId) {
+                removeUserSocket(userId, socket.id);
+                console.log(`[socket] user ${userId} disconnected (${reason}) — remaining sockets:`, getUserSocketIds(userId).length);
+                // (optional) broadcast online users update
+                io.emit('online:users', { users: getOnlineUserIds() });
+            } else {
+                console.log(`[socket] anonymous socket disconnected: ${reason}`);
+            }
+        });
+    });
+
+    io.on('error', (err) => {
+        console.error('[socket] server error:', err?.message || err);
+    });
+
+    console.log('[socket] Socket.IO initialized');
     return io;
 }
 
@@ -361,47 +189,15 @@ function getIO() {
     return io;
 }
 
-function getConnectedUsers() {
-    return Array.from(connectedUsers.entries()).map(([userId, info]) => ({
-        userId,
-        sockets: Array.from(info.sockets || []),
-        email: info.email,
-        firstConnectedAt: info.firstConnectedAt,
-        lastActivity: info.lastActivity,
-    }));
-}
-
-function isUserOnline(userId) {
-    const e = connectedUsers.get(String(userId));
-    return !!e && e.sockets && e.sockets.size > 0;
-}
-
-function sendNotificationToUser(userId, notification) {
-    if (!io) return false;
-    const id = String(userId);
-    if (isUserOnline(id)) {
-        io.to(id).emit('notification', notification);
-        return true;
-    }
-    return false;
-}
-
-function broadcastToAll(event, data) {
-    if (!io) return;
-    io.emit(event, data);
-}
-
-function sendToRoom(roomId, event, data) {
-    if (!io) return;
-    io.to(String(roomId)).emit(event, data);
-}
-
 module.exports = {
     initSocket,
     getIO,
-    getConnectedUsers,
-    isUserOnline,
-    sendNotificationToUser,
-    broadcastToAll,
-    sendToRoom,
+    emitUnreadCount,
+    userRoom,
+    // new exports for online tracking / emitting
+    getOnlineUserIds,
+    getOnlineUserCount,
+    getUserSocketIds,
+    emitToUser,
+    emitToUsers,
 };

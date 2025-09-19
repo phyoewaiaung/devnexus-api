@@ -19,8 +19,8 @@ mongoose.connect(MONGO_URI)
   .then(() => {
     console.log('Connected to MongoDB');
     const server = http.createServer(app);
-    const io = initSocket(server);   // ✅ get instance
-    app.set('io', io);               // ✅ allow controllers to emit
+    const io = initSocket(server);
+    app.set('io', io);
     server.listen(PORT, () => console.log(`Server http://localhost:${PORT}`));
   })
   .catch((err) => {

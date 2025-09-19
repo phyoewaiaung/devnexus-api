@@ -1,7 +1,7 @@
 const path = require('path');
 const Post = require('../models/PostModel');
 const User = require('../models/UsersModel');
-const { getIO } = require('../socket');
+const { getIO, userRoom, emitUnreadCount } = require('../socket');
 const Notification = require('../models/NotificationModel');
 
 /** Map common aliases to our allowed names */
@@ -130,7 +130,6 @@ exports.feed = async (req, res, next) => {
   } catch (e) { next(e); }
 };
 
-
 exports.followingFeed = async (req, res, next) => {
   try {
     const page = Math.max(parseInt(req.query.page || '1', 10), 1);
@@ -214,13 +213,13 @@ exports.toggleLike = async (req, res, next) => {
 
     res.json({ likesCount: post.likesCount, liked: !has });
 
-    (async () => {
+    // Background notif handling
+    setImmediate(async () => {
       try {
         const recipientId = String(post.author);
         if (recipientId === String(uid)) return;
 
-        const io = getIO();
-
+        const io = getIO(); // will throw if not initialized
         if (has) {
           await Notification.deleteOne({
             recipient: recipientId,
@@ -229,7 +228,7 @@ exports.toggleLike = async (req, res, next) => {
             type: 'like',
           });
 
-          io.to(recipientId).emit('notification:remove', {
+          io.to(userRoom(recipientId)).emit('notification:remove', {
             type: 'like',
             postId: String(id),
             actorId: String(uid),
@@ -237,11 +236,11 @@ exports.toggleLike = async (req, res, next) => {
         } else {
           const notif = await Notification.findOneAndUpdate(
             { recipient: recipientId, actor: uid, post: id, type: 'like' },
-            { $setOnInsert: { read: false } },
+            { $setOnInsert: { read: false, createdAt: new Date() } },
             { new: true, upsert: true }
           ).populate({ path: 'actor', select: 'name username avatarUrl' });
 
-          io.to(recipientId).emit('notification:new', {
+          io.to(userRoom(recipientId)).emit('notification:new', {
             id: String(notif._id),
             type: 'like',
             postId: String(id),
@@ -250,15 +249,16 @@ exports.toggleLike = async (req, res, next) => {
             actor: notif.actor,
           });
         }
-      } catch (e) { console.log(e); }
-    })();
 
+        // keep the badge in sync
+        await emitUnreadCount(recipientId);
+      } catch (e) {
+        console.error('Error handling like notification:', e);
+      }
+    });
   } catch (e) { next(e); }
 };
 
-// -----------------------------
-// POST /api/posts/:id/comments
-// -----------------------------
 exports.addComment = async (req, res, next) => {
   try {
     const { text } = req.body;
@@ -275,10 +275,9 @@ exports.addComment = async (req, res, next) => {
     if (!post) return res.status(404).json({ message: 'Post not found' });
 
     const newComment = post.comments[post.comments.length - 1];
-
     res.status(201).json({ comments: post.comments });
 
-    (async () => {
+    setImmediate(async () => {
       try {
         const recipientId = String(post.author);
         const actorId = String(req.user.id);
@@ -290,26 +289,32 @@ exports.addComment = async (req, res, next) => {
           type: 'comment',
           post: post._id,
           comment: newComment?._id,
+          read: false,
+          createdAt: new Date(),
         });
+
         await notif.populate({ path: 'actor', select: 'name username avatarUrl' });
 
         const io = getIO();
-        io.to(recipientId).emit('notification:new', {
+        io.to(userRoom(recipientId)).emit('notification:new', {
           id: String(notif._id),
           type: 'comment',
           postId: String(post._id),
           commentId: String(newComment?._id),
-          comment_desc: String(newComment?.text),
+          comment_desc: String(newComment?.text || '').substring(0, 100),
           read: notif.read,
           createdAt: notif.createdAt,
           actor: notif.actor,
         });
 
-      } catch { /* ignore */ }
-    })();
-
+        await emitUnreadCount(recipientId);
+      } catch (e) {
+        console.error('Error handling comment notification:', e);
+      }
+    });
   } catch (e) { next(e); }
 };
+
 
 // -----------------------------
 // GET /api/posts/:id/comments
@@ -323,7 +328,6 @@ exports.listComments = async (req, res, next) => {
     res.json({ comments: post.comments });
   } catch (e) { next(e); }
 };
-
 
 exports.getById = async (req, res, next) => {
   try {
