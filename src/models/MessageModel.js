@@ -12,10 +12,9 @@ const messageSchema = new Schema({
         name: String,
         size: Number
     }],
-    // per-recipient delivery + read receipts
     deliveredTo: [{ type: Types.ObjectId, ref: 'User', index: true }],
     readBy: [{ type: Types.ObjectId, ref: 'User', index: true }],
-    deletedFor: [{ type: Types.ObjectId, ref: 'User' }],   // per-user soft delete
+    deletedFor: [{ type: Types.ObjectId, ref: 'User' }],
 }, { timestamps: true });
 
 messageSchema.index({ conversation: 1, createdAt: -1 });

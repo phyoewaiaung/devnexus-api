@@ -1,27 +1,55 @@
+// controllers/usersController.js
+// Simple, consistent style. Focused on auth + profile/theme. JWT cookie refresh flow.
+
 const jwt = require('jsonwebtoken');
 const User = require('../models/UsersModel');
+
+// --- helpers ---------------------------------------------------------------
+const ACCESS_TTL = process.env.ACCESS_TOKEN_EXPIRY || '15m';
+const REFRESH_TTL = process.env.REFRESH_TOKEN_EXPIRY || '7d';
 
 const signAccess = (user) =>
   jwt.sign(
     { id: user._id, username: user.username, roles: user.roles, email: user.email },
     process.env.JWT_ACCESS_SECRET,
-    { expiresIn: process.env.ACCESS_TOKEN_EXPIRY || '15m' }
+    { expiresIn: ACCESS_TTL }
   );
 
 const signRefresh = (user) =>
   jwt.sign(
-    { id: user._id },
+    { id: user._id, tokenVersion: user.tokenVersion || 0 },
     process.env.JWT_REFRESH_SECRET,
-    { expiresIn: process.env.REFRESH_TOKEN_EXPIRY || '7d' }
+    { expiresIn: REFRESH_TTL }
   );
 
-// POST /register
+const setRefreshCookie = (res, token) => {
+  res.cookie('refreshToken', token, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'Lax',
+    maxAge: 7 * 24 * 60 * 60 * 1000,
+    path: '/api/users',
+  });
+};
+
+const clearRefreshCookie = (res) => {
+  res.clearCookie('refreshToken', {
+    httpOnly: true,
+    sameSite: 'Lax',
+    secure: process.env.NODE_ENV === 'production',
+    path: '/api/users',
+  });
+};
+
+// --- controllers -----------------------------------------------------------
+// POST /api/users/register
 exports.register = async (req, res, next) => {
   try {
-    let { name, username, email, password, bio, skills, avatarUrl, socialLinks } = req.body;
+    let { name, username, email, password, bio, skills, avatarUrl, socialLinks, theme } = req.body;
     if (!name || !username || !email || !password) {
       return res.status(400).json({ message: 'Missing required fields' });
     }
+
     username = String(username).toLowerCase().trim();
     email = String(email).toLowerCase().trim();
 
@@ -29,26 +57,31 @@ exports.register = async (req, res, next) => {
     if (exists) return res.status(409).json({ message: 'User already exists' });
 
     const parseSkills = (v) =>
-      Array.isArray(v) ? v : String(v || '').split(',').map(s => s.trim()).filter(Boolean);
+      Array.isArray(v) ? v : String(v || '').split(',').map((s) => s.trim()).filter(Boolean);
+
     const parseLinks = (v) => {
       const o = v || {};
       return {
         website: o.website || '',
         github: o.github || '',
         twitter: o.twitter || '',
-        linkedin: o.linkedin || ''
+        linkedin: o.linkedin || '',
       };
     };
+
     const user = new User({
-      name, username, email,
-      passwordHash: password,
+      name,
+      username,
+      email,
+      passwordHash: password, // assume model hashes this
       bio: bio || '',
       skills: parseSkills(skills),
       avatarUrl: avatarUrl || '',
       socialLinks: parseLinks(socialLinks),
       roles: ['user'],
       theme: ['light', 'dark'].includes(theme) ? theme : 'light',
-    })
+      tokenVersion: 0,
+    });
     await user.save();
 
     return res.status(201).json({ message: 'Registered' });
@@ -57,7 +90,7 @@ exports.register = async (req, res, next) => {
   }
 };
 
-//theme
+// PATCH /api/users/theme
 exports.updateTheme = async (req, res, next) => {
   try {
     const { theme } = req.body;
@@ -76,7 +109,7 @@ exports.updateTheme = async (req, res, next) => {
   }
 };
 
-// POST /login
+// POST /api/users/login
 exports.login = async (req, res, next) => {
   try {
     const { usernameOrEmail, password } = req.body;
@@ -92,14 +125,7 @@ exports.login = async (req, res, next) => {
 
     const accessToken = signAccess(user);
     const refreshToken = signRefresh(user);
-
-    res.cookie('refreshToken', refreshToken, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'Lax',
-      maxAge: 7 * 24 * 60 * 60 * 1000,
-      path: '/api/users',
-    });
+    setRefreshCookie(res, refreshToken);
 
     return res.json({ accessToken });
   } catch (e) {
@@ -107,7 +133,7 @@ exports.login = async (req, res, next) => {
   }
 };
 
-// POST /refresh
+// POST /api/users/refresh
 exports.refresh = async (req, res, next) => {
   try {
     const token = req.cookies?.refreshToken;
@@ -115,9 +141,11 @@ exports.refresh = async (req, res, next) => {
 
     jwt.verify(token, process.env.JWT_REFRESH_SECRET, async (err, decoded) => {
       if (err) return res.status(403).json({ message: 'Invalid refresh token' });
-      const user = await User.findById(decoded.id).select('_id username roles');
+      const user = await User.findById(decoded.id).select('_id username roles tokenVersion email');
       if (!user) return res.status(401).json({ message: 'User not found' });
-
+      if ((decoded.tokenVersion || 0) !== (user.tokenVersion || 0)) {
+        return res.status(403).json({ message: 'Token revoked' });
+      }
       const accessToken = signAccess(user);
       return res.json({ accessToken });
     });
@@ -126,18 +154,22 @@ exports.refresh = async (req, res, next) => {
   }
 };
 
-// POST /logout
+// POST /api/users/logout
 exports.logout = (_req, res) => {
-  res.clearCookie('refreshToken', {
-    httpOnly: true,
-    sameSite: 'Lax',
-    secure: process.env.NODE_ENV === 'production',
-    path: '/api/users',
-  });
+  clearRefreshCookie(res);
   res.json({ message: 'Logged out' });
 };
 
-// GET /me
+// POST /api/users/revoke (optional: force refresh token rotation)
+exports.revoke = async (req, res, next) => {
+  try {
+    await User.findByIdAndUpdate(req.user.id, { $inc: { tokenVersion: 1 } });
+    clearRefreshCookie(res);
+    res.json({ message: 'Revoked' });
+  } catch (e) { next(e); }
+};
+
+// GET /api/users/me
 exports.me = async (req, res, next) => {
   try {
     const user = await User.findById(req.user.id).select('-passwordHash -__v');
@@ -147,3 +179,17 @@ exports.me = async (req, res, next) => {
     next(e);
   }
 };
+
+// GET /api/users/search?q=term
+exports.search = async (req, res, next) => {
+  try {
+    const q = String(req.query.q || '').trim();
+    if (!q) return res.json({ users: [] });
+    const rx = new RegExp(q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+    const users = await User.find({ $or: [{ username: rx }, { name: rx }, { email: rx }] })
+      .limit(20)
+      .select('_id name username avatarUrl bio skills');
+    res.json({ users });
+  } catch (e) { next(e); }
+};
+
