@@ -1,7 +1,9 @@
 // socket.js
 const { Server } = require('socket.io');
 const jwt = require('jsonwebtoken');
-const Notification = require('./models/NotificationModel'); // <- add
+const Notification = require('./models/NotificationModel');
+const Conversation = require('./models/ConversationModel'); // Add this import
+
 let io = null;
 
 /* Track online sockets per user */
@@ -78,6 +80,10 @@ function userRoom(userId) {
     return `user:${userId}`;
 }
 
+function conversationRoom(conversationId) {
+    return `conversation:${conversationId}`;
+}
+
 async function emitUnreadCount(userId) {
     try {
         const unread = await Notification.countDocuments({ recipient: userId, read: false });
@@ -118,13 +124,30 @@ function getUserSocketIds(userId) {
 }
 
 function emitToUser(userId, event, payload) {
-    // rooms already group all sockets for that user
     io.to(userRoom(String(userId))).emit(event, payload);
 }
 
 function emitToUsers(userIds = [], event, payload) {
     const rooms = userIds.map((id) => userRoom(String(id)));
     if (rooms.length) io.to(rooms).emit(event, payload);
+}
+
+/* Join user to all their conversation rooms */
+async function joinUserConversations(socket, userId) {
+    try {
+        const conversations = await Conversation.find({
+            'participants.user': userId,
+            'participants.status': 'member' // Only join rooms where user is a member
+        }).select('_id').lean();
+
+        for (const conv of conversations) {
+            const roomName = conversationRoom(String(conv._id));
+            socket.join(roomName);
+            console.log(`[socket] user ${userId} joined conversation room: ${roomName}`);
+        }
+    } catch (error) {
+        console.error('[socket] failed to join user conversations:', error);
+    }
 }
 
 /* -----------------------------
@@ -155,11 +178,38 @@ function initSocket(httpServer) {
             addUserSocket(userId, socket.id);
             console.log(`[socket] user ${userId} connected (socket ${socket.id}) — sockets:`, getUserSocketIds(userId).length);
 
+            // Join all conversation rooms for this user
+            await joinUserConversations(socket, userId);
+
             // initial unread count
             await emitUnreadCount(userId);
 
             // (optional) let clients know who is online
             io.emit('online:users', { users: getOnlineUserIds() });
+
+            // Handle explicit conversation joining (optional, for manual room management)
+            socket.on('chat:join', ({ conversationId }) => {
+                if (conversationId) {
+                    const roomName = conversationRoom(String(conversationId));
+                    socket.join(roomName);
+                    console.log(`[socket] user ${userId} manually joined: ${roomName}`);
+                }
+            });
+
+            socket.on('chat:typing', ({ conversationId, isTyping }) => {
+                if (!conversationId) return;
+
+                const roomName = conversationRoom(String(conversationId));
+
+                // Emit to the conversation room, not globally
+                socket.to(roomName).emit('chat:typing', {
+                    conversationId: String(conversationId),
+                    userId: String(socket.id),
+                    from: String(userId),
+                    isTyping: !!isTyping,
+                });
+            });
+
         } else {
             console.warn('[socket] connected socket missing user');
         }
@@ -194,6 +244,7 @@ module.exports = {
     getIO,
     emitUnreadCount,
     userRoom,
+    conversationRoom, // Export this helper
     // new exports for online tracking / emitting
     getOnlineUserIds,
     getOnlineUserCount,
