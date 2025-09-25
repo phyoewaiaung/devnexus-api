@@ -43,8 +43,8 @@ function normalizeTags(input) {
 // -----------------------------
 exports.create = async (req, res, next) => {
   try {
-    const { text = '', tags } = req.body;
-    const trimmed = text.trim();
+    const { text = '', tags, visibility } = req.body;
+    const trimmed = (text || '').trim();
 
     if (!trimmed && !req.file) {
       return res.status(400).json({ message: 'Text or image required' });
@@ -52,6 +52,11 @@ exports.create = async (req, res, next) => {
     if (trimmed.length > 5000) {
       return res.status(400).json({ message: 'Text exceeds 5,000 characters' });
     }
+
+    // Visibility
+    const VIS_ENUM = ['public', 'followers'];
+    let vis = String(visibility || 'public').toLowerCase();
+    if (!VIS_ENUM.includes(vis)) vis = 'public';
 
     // Build image (if uploaded by multer)
     let image = null;
@@ -65,7 +70,6 @@ exports.create = async (req, res, next) => {
     const normalizedTags = normalizeTags(tags);
     const languages = extractLanguages(trimmed);
 
-    // if user tagged a known language, include it in languages as well
     for (const t of normalizedTags) {
       if (Post.ALLOWED_LANGS.includes(t) && !languages.includes(t)) languages.push(t);
     }
@@ -75,7 +79,8 @@ exports.create = async (req, res, next) => {
       text: trimmed || '',
       image,
       tags: normalizedTags,
-      languages
+      languages,
+      visibility: vis, // NEW
     });
 
     res.status(201).json({ post });
@@ -89,6 +94,7 @@ exports.create = async (req, res, next) => {
     next(e);
   }
 };
+
 
 // -----------------------------
 // DELETE /api/posts/:id
@@ -109,6 +115,7 @@ exports.feed = async (req, res, next) => {
     const page = Math.max(parseInt(req.query.page || '1', 10), 1);
     const limit = Math.min(Math.max(parseInt(req.query.limit || '10', 10), 1), 50);
 
+    // Base filters
     const q = {};
     if (req.query.lang) {
       q.languages = { $in: String(req.query.lang).toLowerCase().split(',').filter(Boolean) };
@@ -116,6 +123,36 @@ exports.feed = async (req, res, next) => {
     if (req.query.tag) {
       q.tags = { $in: String(req.query.tag).toLowerCase().split(',').filter(Boolean) };
     }
+
+    // Visibility filter:
+    // - Always allow public (and legacy posts without visibility)
+    // - If logged in, allow followers-only posts from:
+    //   * people I follow
+    //   * people who follow me
+    //   * myself
+    const orVis = [
+      { visibility: 'public' },
+      { visibility: { $exists: false } }, // legacy == public
+    ];
+
+    if (req.user?.id) {
+      const me = await User.findById(req.user.id).select('_id following followers').lean();
+      const followingIds = new Set((me?.following || []).map((x) => String(x)));
+      const followerIds = new Set((me?.followers || []).map((x) => String(x)));
+
+      const connected = new Set([String(req.user.id)]);
+      for (const id of followingIds) connected.add(id);
+      for (const id of followerIds) connected.add(id);
+
+      if (connected.size > 0) {
+        orVis.push({
+          visibility: 'followers',
+          author: { $in: Array.from(connected) },
+        });
+      }
+    }
+
+    q.$or = orVis;
 
     const posts = await Post.find(q)
       .sort({ createdAt: -1 })
@@ -135,30 +172,31 @@ exports.followingFeed = async (req, res, next) => {
     const page = Math.max(parseInt(req.query.page || '1', 10), 1);
     const limit = Math.min(Math.max(parseInt(req.query.limit || '10', 10), 1), 50);
 
-    // 1) Load who the user follows
-    const me = await User.findById(req.user.id).select('following');
+    // 1) Who I follow
+    const me = await User.findById(req.user.id).select('following').lean();
     const followingIds = (me?.following || []).map(String);
 
-    // If not following anyone, short-circuit
     if (!followingIds.length) {
       return res.json({ posts: [], page, limit });
     }
 
-    // 2) Build query (reuse your lang/tag filters)
+    // 2) Filters (author + optional lang/tag)
     const q = { author: { $in: followingIds } };
 
     if (req.query.lang) {
-      q.languages = {
-        $in: String(req.query.lang).toLowerCase().split(',').filter(Boolean)
-      };
+      q.languages = { $in: String(req.query.lang).toLowerCase().split(',').filter(Boolean) };
     }
     if (req.query.tag) {
-      q.tags = {
-        $in: String(req.query.tag).toLowerCase().split(',').filter(Boolean)
-      };
+      q.tags = { $in: String(req.query.tag).toLowerCase().split(',').filter(Boolean) };
     }
 
-    // 3) Fetch posts
+    // 3) Visibility: allow 'public' and 'followers' from followed authors; also legacy (no visibility)
+    q.$or = [
+      { visibility: 'public' },
+      { visibility: 'followers' },
+      { visibility: { $exists: false } }, // legacy == public
+    ];
+
     const posts = await Post.find(q)
       .sort({ createdAt: -1 })
       .skip((page - 1) * limit)

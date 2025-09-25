@@ -1,5 +1,6 @@
 // ChatController.js - Key changes for socket rooms
 const mongoose = require('mongoose');
+const path = require('path');
 const Conversation = require('../models/ConversationModel');
 const Message = require('../models/MessageModel');
 const Notification = require('../models/NotificationModel');
@@ -44,7 +45,44 @@ async function createNotifAndEmit({ recipientId, actorId, type, conversationId, 
 }
 
 // ... keep all other existing methods unchanged until sendMessage ...
+const publicUrl = (req, relPath) => {
+    const cleaned = String(relPath).replace(/\\/g, '/').replace(/^\/+/, '');
+    const proto = req.protocol;
+    const host = req.get('host');
+    return `${proto}://${host}/${cleaned}`;
+};
 
+exports.uploadAttachments = async (req, res, next) => {
+    try {
+        const files = req.files || [];
+        if (!files.length) return res.status(400).json({ message: 'No files uploaded' });
+
+        const attachments = files.map((f) => {
+            // ALWAYS forward slashes; URL should be under /uploads/chat/...
+            const rel = path.join('uploads', 'chat', f.filename).replace(/\\/g, '/');
+            return {
+                url: publicUrl(req, rel),
+                type: 'image',
+                name: f.originalname,
+                size: f.size,
+            };
+        });
+
+        res.status(201).json({ attachments });
+    } catch (e) { next(e); }
+};
+
+// (Optional) single file (legacy)
+exports.uploadAttachment = async (req, res, next) => {
+    try {
+        if (!req.file) return res.status(400).json({ message: 'No file uploaded' });
+        const rel = path.join('uploads', 'chat', req.file.filename).replace(/\\/g, '/');
+        const url = publicUrl(req, rel);
+        return res.status(201).json({
+            attachment: { url, type: 'image', name: req.file.originalname, size: req.file.size },
+        });
+    } catch (e) { next(e); }
+};
 /** --------- POST /api/chats/conversations/:id/messages */
 exports.sendMessage = async (req, res, next) => {
     try {

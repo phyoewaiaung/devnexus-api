@@ -1,4 +1,3 @@
-// models/post.model.js
 const mongoose = require('mongoose');
 
 const CommentSchema = new mongoose.Schema({
@@ -28,12 +27,13 @@ const PostSchema = new mongoose.Schema({
   image: { type: ImageSchema, default: null },
   tags: [{ type: String, trim: true, lowercase: true, index: true }],
   languages: [{ type: String, enum: ALLOWED_LANGS, index: true }],
+  visibility: { type: String, enum: ['public', 'followers'], default: 'public', index: true }, // NEW
   likes: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
   likesCount: { type: Number, default: 0 },
   comments: [CommentSchema]
 }, { timestamps: true });
 
-// keep likesCount synced
+// keep likesCount & arrays normalized
 PostSchema.pre('save', function (next) {
   if (Array.isArray(this.likes)) this.likesCount = this.likes.length;
   if (Array.isArray(this.tags)) this.tags = [...new Set(this.tags.map(t => t.toLowerCase()))];
