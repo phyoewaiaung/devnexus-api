@@ -2,7 +2,7 @@
 const { Server } = require('socket.io');
 const jwt = require('jsonwebtoken');
 const Notification = require('./models/NotificationModel');
-const Conversation = require('./models/ConversationModel'); // Add this import
+const Conversation = require('./models/ConversationModel');
 
 let io = null;
 
@@ -10,8 +10,8 @@ let io = null;
 const userSockets = new Map(); // userId -> Set<socketId>
 
 /* -----------------------------
-   Token helpers (cookie/header)
--------------------------------- */
+   Cookie / token helpers
+------------------------------ */
 function getCookieMap(cookieStr = '') {
     return cookieStr
         .split(';')
@@ -31,7 +31,10 @@ function extractToken(socket) {
     const fromHeader = hs.headers?.authorization;
     const cookies = getCookieMap(hs.headers?.cookie || '');
     const fromCookie =
-        cookies.token || cookies.accessToken || cookies.jwt || cookies['access_token'];
+        cookies.token ||
+        cookies.accessToken ||
+        cookies.jwt ||
+        cookies['access_token'];
 
     let raw = fromAuth || fromHeader || fromCookie;
     if (!raw) return null;
@@ -41,7 +44,7 @@ function extractToken(socket) {
 
 /* -----------------------------
    Auth middleware (JWT verify)
--------------------------------- */
+------------------------------ */
 function authenticateSocket(socket, next) {
     try {
         const token = extractToken(socket);
@@ -61,21 +64,19 @@ function authenticateSocket(socket, next) {
             roles: payload.roles || [],
         };
 
-        return next();
+        next();
     } catch (err) {
         const msg =
-            err.name === 'TokenExpiredError'
-                ? 'Token expired'
-                : err.name === 'JsonWebTokenError'
-                    ? 'Invalid token'
-                    : 'Authentication failed';
-        return next(new Error(msg));
+            err.name === 'TokenExpiredError' ? 'Token expired' :
+                err.name === 'JsonWebTokenError' ? 'Invalid token' :
+                    'Authentication failed';
+        next(new Error(msg));
     }
 }
 
 /* -----------------------------
-   Helpers
--------------------------------- */
+   Rooms & helpers
+------------------------------ */
 function userRoom(userId) {
     return `user:${userId}`;
 }
@@ -93,7 +94,6 @@ async function emitUnreadCount(userId) {
     }
 }
 
-/* Manage userSockets map */
 function addUserSocket(userId, socketId) {
     let set = userSockets.get(userId);
     if (!set) {
@@ -110,40 +110,35 @@ function removeUserSocket(userId, socketId) {
     if (set.size === 0) userSockets.delete(userId);
 }
 
-/* Public helpers to inspect/emit */
+/* Public helpers */
 function getOnlineUserIds() {
     return Array.from(userSockets.keys());
 }
-
 function getOnlineUserCount() {
     return userSockets.size;
 }
-
 function getUserSocketIds(userId) {
     return Array.from(userSockets.get(String(userId)) || []);
 }
-
 function emitToUser(userId, event, payload) {
     io.to(userRoom(String(userId))).emit(event, payload);
 }
-
 function emitToUsers(userIds = [], event, payload) {
     const rooms = userIds.map((id) => userRoom(String(id)));
     if (rooms.length) io.to(rooms).emit(event, payload);
 }
 
-/* Join user to all their conversation rooms */
+/* Join all conversation rooms for a user */
 async function joinUserConversations(socket, userId) {
     try {
         const conversations = await Conversation.find({
             'participants.user': userId,
-            'participants.status': 'member' // Only join rooms where user is a member
+            'participants.status': 'member',
         }).select('_id').lean();
 
         for (const conv of conversations) {
             const roomName = conversationRoom(String(conv._id));
             socket.join(roomName);
-            console.log(`[socket] user ${userId} joined conversation room: ${roomName}`);
         }
     } catch (error) {
         console.error('[socket] failed to join user conversations:', error);
@@ -151,65 +146,79 @@ async function joinUserConversations(socket, userId) {
 }
 
 /* -----------------------------
-   Init & basic lifecycle logs
--------------------------------- */
-function initSocket(httpServer) {
-    const allowedOrigins = [
-        'http://localhost:5173',
-        'http://localhost:3000',
-        'http://localhost:4173',
+   Origin allowlist
+------------------------------ */
+function parseOriginsFromEnv() {
+    const csv = process.env.CORS_ORIGINS;
+    const envList = csv ? csv.split(',').map((s) => s.trim()).filter(Boolean) : [];
+    const legacy = [
         process.env.WEB_ORIGIN,
         process.env.FRONTEND_URL,
         process.env.CLIENT_URL,
+        'http://localhost:5173',
+        'http://localhost:3000',
+        'http://localhost:4173',
     ].filter(Boolean);
+    const set = new Set([...envList, ...legacy]);
+    const arr = Array.from(set);
+    return arr.length ? arr : true; // dev fallback
+}
+
+/* -----------------------------
+   Init
+------------------------------ */
+function initSocket(httpServer, options = {}) {
+    const allowedOrigins = parseOriginsFromEnv();
 
     io = new Server(httpServer, {
-        cors: { origin: allowedOrigins, credentials: true, methods: ['GET', 'POST'] },
-        path: '/socket.io/',
+        path: options.path || '/socket.io/',
         serveClient: false,
+        cors: {
+            origin: options.cors?.origin ?? allowedOrigins,
+            credentials: options.cors?.credentials ?? true,
+            methods: options.cors?.methods ?? ['GET', 'POST'],
+        },
+        transports: options.transports || ['websocket', 'polling'],
+        pingTimeout: options.pingTimeout || 20000,
+        pingInterval: options.pingInterval || 25000,
+        connectionStateRecovery: options.connectionStateRecovery ?? {
+            maxDisconnectionDuration: 2 * 60 * 1000,
+            skipMiddlewares: false,
+        },
     });
 
     io.use(authenticateSocket);
 
     io.on('connection', async (socket) => {
         const userId = socket.user?.id;
+
         if (userId) {
             socket.join(userRoom(userId));
             addUserSocket(userId, socket.id);
-            console.log(`[socket] user ${userId} connected (socket ${socket.id}) — sockets:`, getUserSocketIds(userId).length);
+            console.log(
+                `[socket] user ${userId} connected (${socket.id}); sockets: ${getUserSocketIds(userId).length}`
+            );
 
-            // Join all conversation rooms for this user
             await joinUserConversations(socket, userId);
-
-            // initial unread count
             await emitUnreadCount(userId);
 
-            // (optional) let clients know who is online
             io.emit('online:users', { users: getOnlineUserIds() });
 
-            // Handle explicit conversation joining (optional, for manual room management)
             socket.on('chat:join', ({ conversationId }) => {
-                if (conversationId) {
-                    const roomName = conversationRoom(String(conversationId));
-                    socket.join(roomName);
-                    console.log(`[socket] user ${userId} manually joined: ${roomName}`);
-                }
+                if (!conversationId) return;
+                const roomName = conversationRoom(String(conversationId));
+                socket.join(roomName);
             });
 
             socket.on('chat:typing', ({ conversationId, isTyping }) => {
                 if (!conversationId) return;
-
                 const roomName = conversationRoom(String(conversationId));
-
-                // Emit to the conversation room, not globally
                 socket.to(roomName).emit('chat:typing', {
                     conversationId: String(conversationId),
-                    userId: String(socket.id),
-                    from: String(userId),
+                    userId: String(userId), // app user id (not socket id)
                     isTyping: !!isTyping,
                 });
             });
-
         } else {
             console.warn('[socket] connected socket missing user');
         }
@@ -217,8 +226,9 @@ function initSocket(httpServer) {
         socket.on('disconnect', (reason) => {
             if (userId) {
                 removeUserSocket(userId, socket.id);
-                console.log(`[socket] user ${userId} disconnected (${reason}) — remaining sockets:`, getUserSocketIds(userId).length);
-                // (optional) broadcast online users update
+                console.log(
+                    `[socket] user ${userId} disconnected (${reason}); remaining: ${getUserSocketIds(userId).length}`
+                );
                 io.emit('online:users', { users: getOnlineUserIds() });
             } else {
                 console.log(`[socket] anonymous socket disconnected: ${reason}`);
@@ -244,8 +254,7 @@ module.exports = {
     getIO,
     emitUnreadCount,
     userRoom,
-    conversationRoom, // Export this helper
-    // new exports for online tracking / emitting
+    conversationRoom,
     getOnlineUserIds,
     getOnlineUserCount,
     getUserSocketIds,
