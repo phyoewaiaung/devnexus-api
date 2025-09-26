@@ -30,7 +30,9 @@ const PostSchema = new mongoose.Schema({
   visibility: { type: String, enum: ['public', 'followers'], default: 'public', index: true }, // NEW
   likes: [{ type: mongoose.Schema.Types.ObjectId, ref: 'User' }],
   likesCount: { type: Number, default: 0 },
-  comments: [CommentSchema]
+  comments: [CommentSchema],
+  repostOf: { type: mongoose.Schema.Types.ObjectId, ref: 'Post', default: null },
+  repostCount: { type: Number, default: 0 },
 }, { timestamps: true });
 
 // keep likesCount & arrays normalized

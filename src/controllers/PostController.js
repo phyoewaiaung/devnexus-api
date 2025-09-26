@@ -38,9 +38,9 @@ function normalizeTags(input) {
   return [];
 }
 
-// -----------------------------
-// POST /api/posts   (multipart: text + optional image + optional tags)
-// -----------------------------
+/* ============================================
+ * POST /api/posts   (create)
+ * ============================================ */
 exports.create = async (req, res, next) => {
   try {
     const { text = '', tags, visibility } = req.body;
@@ -53,7 +53,6 @@ exports.create = async (req, res, next) => {
       return res.status(400).json({ message: 'Text exceeds 5,000 characters' });
     }
 
-    // Visibility
     const VIS_ENUM = ['public', 'followers'];
     let vis = String(visibility || 'public').toLowerCase();
     if (!VIS_ENUM.includes(vis)) vis = 'public';
@@ -69,7 +68,6 @@ exports.create = async (req, res, next) => {
     // Tags & languages
     const normalizedTags = normalizeTags(tags);
     const languages = extractLanguages(trimmed);
-
     for (const t of normalizedTags) {
       if (Post.ALLOWED_LANGS.includes(t) && !languages.includes(t)) languages.push(t);
     }
@@ -80,7 +78,7 @@ exports.create = async (req, res, next) => {
       image,
       tags: normalizedTags,
       languages,
-      visibility: vis, // NEW
+      visibility: vis,
     });
 
     res.status(201).json({ post });
@@ -95,10 +93,9 @@ exports.create = async (req, res, next) => {
   }
 };
 
-
-// -----------------------------
-// DELETE /api/posts/:id
-// -----------------------------
+/* ============================================
+ * DELETE /api/posts/:id
+ * ============================================ */
 exports.remove = async (req, res, next) => {
   try {
     const p = await Post.findOneAndDelete({ _id: req.params.id, author: req.user.id });
@@ -107,9 +104,9 @@ exports.remove = async (req, res, next) => {
   } catch (e) { next(e); }
 };
 
-// -----------------------------
-// GET /api/posts/feed?page=1&limit=10&lang=js,python&tag=react
-// -----------------------------
+/* ============================================
+ * GET /api/posts/feed
+ * ============================================ */
 exports.feed = async (req, res, next) => {
   try {
     const page = Math.max(parseInt(req.query.page || '1', 10), 1);
@@ -124,12 +121,7 @@ exports.feed = async (req, res, next) => {
       q.tags = { $in: String(req.query.tag).toLowerCase().split(',').filter(Boolean) };
     }
 
-    // Visibility filter:
-    // - Always allow public (and legacy posts without visibility)
-    // - If logged in, allow followers-only posts from:
-    //   * people I follow
-    //   * people who follow me
-    //   * myself
+    // Visibility rules
     const orVis = [
       { visibility: 'public' },
       { visibility: { $exists: false } }, // legacy == public
@@ -137,18 +129,15 @@ exports.feed = async (req, res, next) => {
 
     if (req.user?.id) {
       const me = await User.findById(req.user.id).select('_id following followers').lean();
-      const followingIds = new Set((me?.following || []).map((x) => String(x)));
-      const followerIds = new Set((me?.followers || []).map((x) => String(x)));
+      const followingIds = new Set((me?.following || []).map(String));
+      const followerIds = new Set((me?.followers || []).map(String));
 
       const connected = new Set([String(req.user.id)]);
       for (const id of followingIds) connected.add(id);
       for (const id of followerIds) connected.add(id);
 
       if (connected.size > 0) {
-        orVis.push({
-          visibility: 'followers',
-          author: { $in: Array.from(connected) },
-        });
+        orVis.push({ visibility: 'followers', author: { $in: Array.from(connected) } });
       }
     }
 
@@ -160,6 +149,8 @@ exports.feed = async (req, res, next) => {
       .limit(limit)
       .populate([
         { path: 'author', select: 'name username avatarUrl' },
+        // populate original post & its author if this is a repost
+        { path: 'repostOf', populate: { path: 'author', select: 'name username avatarUrl' } },
         { path: 'comments.author', select: 'name username avatarUrl' },
       ]);
 
@@ -167,30 +158,25 @@ exports.feed = async (req, res, next) => {
   } catch (e) { next(e); }
 };
 
+/* ============================================
+ * GET /api/posts/feed/following
+ * ============================================ */
 exports.followingFeed = async (req, res, next) => {
   try {
     const page = Math.max(parseInt(req.query.page || '1', 10), 1);
     const limit = Math.min(Math.max(parseInt(req.query.limit || '10', 10), 1), 50);
 
-    // 1) Who I follow
+    // Who I follow
     const me = await User.findById(req.user.id).select('following').lean();
     const followingIds = (me?.following || []).map(String);
+    if (!followingIds.length) return res.json({ posts: [], page, limit });
 
-    if (!followingIds.length) {
-      return res.json({ posts: [], page, limit });
-    }
-
-    // 2) Filters (author + optional lang/tag)
+    // Filters
     const q = { author: { $in: followingIds } };
+    if (req.query.lang) q.languages = { $in: String(req.query.lang).toLowerCase().split(',').filter(Boolean) };
+    if (req.query.tag) q.tags = { $in: String(req.query.tag).toLowerCase().split(',').filter(Boolean) };
 
-    if (req.query.lang) {
-      q.languages = { $in: String(req.query.lang).toLowerCase().split(',').filter(Boolean) };
-    }
-    if (req.query.tag) {
-      q.tags = { $in: String(req.query.tag).toLowerCase().split(',').filter(Boolean) };
-    }
-
-    // 3) Visibility: allow 'public' and 'followers' from followed authors; also legacy (no visibility)
+    // Visibility
     q.$or = [
       { visibility: 'public' },
       { visibility: 'followers' },
@@ -203,6 +189,7 @@ exports.followingFeed = async (req, res, next) => {
       .limit(limit)
       .populate([
         { path: 'author', select: 'name username avatarUrl' },
+        { path: 'repostOf', populate: { path: 'author', select: 'name username avatarUrl' } },
         { path: 'comments.author', select: 'name username avatarUrl' },
       ]);
 
@@ -210,9 +197,9 @@ exports.followingFeed = async (req, res, next) => {
   } catch (e) { next(e); }
 };
 
-// -----------------------------
-// GET /api/posts/user/:username
-// -----------------------------
+/* ============================================
+ * GET /api/posts/user/:username
+ * ============================================ */
 exports.byUser = async (req, res, next) => {
   try {
     const username = String(req.params.username || '').toLowerCase();
@@ -223,6 +210,7 @@ exports.byUser = async (req, res, next) => {
       .sort({ createdAt: -1 })
       .populate([
         { path: 'author', select: 'name username avatarUrl' },
+        { path: 'repostOf', populate: { path: 'author', select: 'name username avatarUrl' } },
         { path: 'comments.author', select: 'name username avatarUrl' },
       ]);
 
@@ -230,9 +218,9 @@ exports.byUser = async (req, res, next) => {
   } catch (e) { next(e); }
 };
 
-// -----------------------------
-// POST /api/posts/:id/like  (toggle)
-// -----------------------------
+/* ============================================
+ * POST /api/posts/:id/like (toggle)
+ * ============================================ */
 exports.toggleLike = async (req, res, next) => {
   try {
     const id = req.params.id;
@@ -297,6 +285,9 @@ exports.toggleLike = async (req, res, next) => {
   } catch (e) { next(e); }
 };
 
+/* ============================================
+ * POST /api/posts/:id/comments
+ * ============================================ */
 exports.addComment = async (req, res, next) => {
   try {
     const { text } = req.body;
@@ -353,10 +344,9 @@ exports.addComment = async (req, res, next) => {
   } catch (e) { next(e); }
 };
 
-
-// -----------------------------
-// GET /api/posts/:id/comments
-// -----------------------------
+/* ============================================
+ * GET /api/posts/:id/comments
+ * ============================================ */
 exports.listComments = async (req, res, next) => {
   try {
     const post = await Post.findById(req.params.id)
@@ -367,6 +357,89 @@ exports.listComments = async (req, res, next) => {
   } catch (e) { next(e); }
 };
 
+/* ============================================
+ * POST /api/posts/:id/repost   (Share as repost)
+ * Body: { text?, visibility? }
+ * Creates a new post referencing the original via `repostOf`,
+ * increments original.repostCount, and notifies the original author.
+ * ============================================ */
+exports.repost = async (req, res, next) => {
+  try {
+    const originalId = req.params.id;
+    const original = await Post.findById(originalId).select('_id author visibility');
+    if (!original) return res.status(404).json({ message: 'Original post not found' });
+
+    const VIS_ENUM = ['public', 'followers'];
+    let vis = String(req.body.visibility || 'public').toLowerCase();
+    if (!VIS_ENUM.includes(vis)) vis = 'public';
+
+    const text = (req.body.text || '').trim();
+    if (text.length > 5000) {
+      return res.status(400).json({ message: 'Quote exceeds 5,000 characters' });
+    }
+
+    const languages = extractLanguages(text);
+
+    // Create the repost (no new image; it references original)
+    const repost = await Post.create({
+      author: req.user.id,
+      text: text || '',
+      image: null,
+      tags: [],             // you can derive tags from the quote if desired
+      languages,
+      visibility: vis,
+      repostOf: original._id,
+    });
+
+    // bump original repostCount
+    await Post.findByIdAndUpdate(original._id, { $inc: { repostCount: 1 } });
+
+    // hydrate for client (populate author + repostOf.author)
+    const hydrated = await Post.findById(repost._id).populate([
+      { path: 'author', select: 'name username avatarUrl' },
+      { path: 'repostOf', populate: { path: 'author', select: 'name username avatarUrl' } },
+    ]);
+
+    // Notify original author (skip self)
+    setImmediate(async () => {
+      try {
+        const actorId = String(req.user.id);
+        const recipientId = String(original.author);
+        if (recipientId === actorId) return;
+
+        const notif = await Notification.create({
+          recipient: recipientId,
+          actor: actorId,
+          type: 'repost',
+          post: original._id,
+          read: false,
+          createdAt: new Date(),
+        });
+        await notif.populate({ path: 'actor', select: 'name username avatarUrl' });
+
+        const io = getIO();
+        io.to(userRoom(recipientId)).emit('notification:new', {
+          id: String(notif._id),
+          type: 'repost',
+          postId: String(original._id),
+          read: notif.read,
+          createdAt: notif.createdAt,
+          actor: notif.actor,
+        });
+
+        await emitUnreadCount(recipientId);
+      } catch (err) {
+        console.error('Error handling repost notification:', err);
+      }
+    });
+
+    res.status(201).json({ post: hydrated });
+  } catch (e) { next(e); }
+};
+
+/* ============================================
+ * GET /api/posts/:id
+ * ============================================ */
 exports.getById = async (req, res, next) => {
   try {
     const id = req.params.id;
@@ -374,6 +447,7 @@ exports.getById = async (req, res, next) => {
     const post = await Post.findById(id)
       .populate([
         { path: 'author', select: 'name username avatarUrl' },
+        { path: 'repostOf', populate: { path: 'author', select: 'name username avatarUrl' } },
         { path: 'comments.author', select: 'name username avatarUrl' },
       ]);
 
@@ -385,6 +459,7 @@ exports.getById = async (req, res, next) => {
       : Array.isArray(post.likes) ? post.likes.length : 0;
 
     obj.commentsCount = Array.isArray(post.comments) ? post.comments.length : 0;
+    obj.repostCount = typeof post.repostCount === 'number' ? post.repostCount : 0;
 
     obj.liked = false;
     if (req.user?.id) {

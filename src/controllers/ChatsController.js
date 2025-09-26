@@ -1,10 +1,9 @@
-// ChatController.js - Key changes for socket rooms
 const mongoose = require('mongoose');
 const path = require('path');
 const Conversation = require('../models/ConversationModel');
 const Message = require('../models/MessageModel');
 const Notification = require('../models/NotificationModel');
-const { getIO, userRoom, conversationRoom, emitUnreadCount } = require('../socket'); // Import conversationRoom
+const { getIO, userRoom, conversationRoom, emitUnreadCount } = require('../socket');
 
 const asObjectId = (v) => new mongoose.Types.ObjectId(String(v));
 
@@ -44,7 +43,6 @@ async function createNotifAndEmit({ recipientId, actorId, type, conversationId, 
     return notif;
 }
 
-// ... keep all other existing methods unchanged until sendMessage ...
 const publicUrl = (req, relPath) => {
     const cleaned = String(relPath).replace(/\\/g, '/').replace(/^\/+/, '');
     const proto = req.protocol;
@@ -58,7 +56,6 @@ exports.uploadAttachments = async (req, res, next) => {
         if (!files.length) return res.status(400).json({ message: 'No files uploaded' });
 
         const attachments = files.map((f) => {
-            // ALWAYS forward slashes; URL should be under /uploads/chat/...
             const rel = path.join('uploads', 'chat', f.filename).replace(/\\/g, '/');
             return {
                 url: publicUrl(req, rel),
@@ -72,7 +69,6 @@ exports.uploadAttachments = async (req, res, next) => {
     } catch (e) { next(e); }
 };
 
-// (Optional) single file (legacy)
 exports.uploadAttachment = async (req, res, next) => {
     try {
         if (!req.file) return res.status(400).json({ message: 'No file uploaded' });
@@ -83,6 +79,7 @@ exports.uploadAttachment = async (req, res, next) => {
         });
     } catch (e) { next(e); }
 };
+
 /** --------- POST /api/chats/conversations/:id/messages */
 exports.sendMessage = async (req, res, next) => {
     try {
@@ -128,7 +125,6 @@ exports.sendMessage = async (req, res, next) => {
             )
         );
 
-        // FIXED: Emit to conversation room instead of convo._id
         const io = getIO?.();
         if (io) {
             const roomName = conversationRoom(String(convo._id));
@@ -162,7 +158,6 @@ exports.markRead = async (req, res, next) => {
             { $addToSet: { readBy: me } }
         );
 
-        // FIXED: Emit to conversation room
         const io = getIO?.();
         if (io) {
             const roomName = conversationRoom(String(convo._id));
@@ -179,13 +174,11 @@ exports.markRead = async (req, res, next) => {
     }
 };
 
-// Keep all other existing exports unchanged...
 exports.startDM = async (req, res, next) => {
     try {
         const { userId, initialMessage = '' } = req.body || {};
         if (!userId) return res.status(400).json({ message: 'userId required' });
 
-        // Reuse createConversation in DM mode
         req.body = { isGroup: false, participantIds: [String(userId)], initialMessage };
         return exports.createConversation(req, res, next);
     } catch (e) {
@@ -205,7 +198,6 @@ exports.createConversation = async (req, res, next) => {
         } = req.body || {};
 
         if (!isGroup) {
-            // DM branch — dedupe exact pair
             const unique = [...new Set([me.toString(), ...participantIds.map(String)])].map(asObjectId);
             if (unique.length !== 2) return res.status(400).json({ message: 'DM requires exactly 2 participants' });
 
@@ -231,7 +223,6 @@ exports.createConversation = async (req, res, next) => {
                 });
             }
 
-            // Optional initial message
             const other = unique.find((id) => String(id) !== String(me));
             const trimmed = String(initialMessage || '').trim();
             if (trimmed) {
@@ -252,7 +243,6 @@ exports.createConversation = async (req, res, next) => {
                     meta: { preview: trimmed.slice(0, 200), kind: 'dm', title: null },
                 });
 
-                // FIXED: Emit to conversation room
                 const io = getIO?.();
                 if (io) {
                     const roomName = conversationRoom(String(convo._id));
@@ -326,7 +316,6 @@ exports.listMyConversations = async (req, res, next) => {
 
         const convIds = items.map((i) => i._id);
 
-        // lastReadAt map (per conversation)
         const lastReads = Object.fromEntries(
             items.map((i) => {
                 const p = (i.participants || []).find(
@@ -336,7 +325,6 @@ exports.listMyConversations = async (req, res, next) => {
             })
         );
 
-        // last message per conversation
         const lastAgg = await Message.aggregate([
             { $match: { conversation: { $in: convIds } } },
             { $sort: { createdAt: -1 } },
@@ -346,7 +334,6 @@ exports.listMyConversations = async (req, res, next) => {
             lastAgg.map((r) => [String(r._id), r.doc])
         );
 
-        // unread counts (0 for invited)
         const unreadMap = {};
         for (const c of items) {
             const mePart = (c.participants || []).find(
@@ -365,7 +352,6 @@ exports.listMyConversations = async (req, res, next) => {
             unreadMap[String(c._id)] = unread;
         }
 
-        // build and filter
         const conversations = items
             .map((i) => {
                 const last = lastMap[String(i._id)];
@@ -380,7 +366,6 @@ exports.listMyConversations = async (req, res, next) => {
                 return { ...i, lastMessage, unread: unreadMap[String(i._id)] || 0 };
             })
             .filter((c) => {
-                // keep all groups, but only keep DMs if they have lastMessage
                 if (c.isGroup) return true;
                 return !!c.lastMessage;
             });
@@ -390,7 +375,6 @@ exports.listMyConversations = async (req, res, next) => {
         next(e);
     }
 };
-
 
 exports.getConversation = async (req, res, next) => {
     try {
@@ -542,7 +526,6 @@ exports.listMessages = async (req, res, next) => {
         if (!mePart) return res.status(403).json({ message: 'Forbidden' });
         if ((mePart.status || 'member') !== 'member') return res.status(403).json({ message: 'Accept the invite to view messages' });
 
-        // newest-first in DB; client will render ascending
         const q = { conversation: convo._id, deletedFor: { $ne: me } };
         if (cursor) q.createdAt = { $lt: new Date(cursor) };
 
@@ -572,6 +555,88 @@ exports.softDeleteMessage = async (req, res, next) => {
             return res.status(403).json({ message: 'Forbidden' });
 
         await Message.updateOne({ _id: msg._id }, { $addToSet: { deletedFor: me } });
+        res.json({ ok: true });
+    } catch (e) {
+        next(e);
+    }
+};
+
+/** --------- NEW: POST /api/chats/conversations/:id/leave (group members) */
+exports.leaveConversation = async (req, res, next) => {
+    try {
+        const me = asObjectId(req.user.id);
+        const convo = await Conversation.findById(req.params.id);
+        if (!convo) return res.status(404).json({ message: 'Not found' });
+        if (!convo.isGroup) return res.status(400).json({ message: 'Cannot leave a DM' });
+
+        const meIdx = (convo.participants || []).findIndex((p) => String(p.user) === String(me));
+        if (meIdx < 0) return res.status(403).json({ message: 'Forbidden' });
+
+        const myPart = convo.participants[meIdx];
+        if ((myPart.status || 'member') !== 'member') {
+            // invited -> remove invitation
+            convo.participants.splice(meIdx, 1);
+            await convo.save();
+            return res.json({ ok: true });
+        }
+
+        if ((myPart.role || 'member') === 'owner') {
+            return res.status(400).json({ message: 'Owner cannot leave. Delete the group instead.' });
+        }
+
+        // remove member
+        convo.participants.splice(meIdx, 1);
+        await convo.save();
+
+        // optional: notify owners
+        // const owners = (convo.participants || []).filter((p) => p.role === 'owner').map((p) => p.user);
+        // await Promise.all(
+        //     owners.map((uid) =>
+        //         createNotifAndEmit({
+        //             recipientId: uid,
+        //             actorId: me,
+        //             type: 'chat:leave',
+        //             conversationId: convo._id,
+        //             meta: { title: convo.title || 'Group', kind: 'group' },
+        //         })
+        //     )
+        // );
+
+        res.json({ ok: true });
+    } catch (e) {
+        next(e);
+    }
+};
+
+/** --------- NEW: DELETE /api/chats/conversations/:id  */
+exports.deleteConversation = async (req, res, next) => {
+    try {
+        const me = asObjectId(req.user.id);
+        const convo = await Conversation.findById(req.params.id);
+        if (!convo) return res.status(404).json({ message: 'Not found' });
+
+        const isParticipant = (convo.participants || []).some((p) => String(p.user) === String(me));
+        if (!isParticipant) return res.status(403).json({ message: 'Forbidden' });
+
+        if (convo.isGroup) {
+            const mePart = (convo.participants || []).find((p) => String(p.user) === String(me));
+            if ((mePart?.role || 'member') !== 'owner') {
+                return res.status(403).json({ message: 'Only the owner can delete the group' });
+            }
+            await Message.deleteMany({ conversation: convo._id });
+            await Conversation.deleteOne({ _id: convo._id });
+        } else {
+            // DM: allow either participant to fully delete the conversation for both
+            await Message.deleteMany({ conversation: convo._id });
+            await Conversation.deleteOne({ _id: convo._id });
+        }
+
+        // Optional: emit a conversation:deleted event
+        const io = getIO?.();
+        if (io) {
+            io.to(conversationRoom(String(convo._id))).emit('conversation:deleted', { conversationId: String(convo._id) });
+        }
+
         res.json({ ok: true });
     } catch (e) {
         next(e);

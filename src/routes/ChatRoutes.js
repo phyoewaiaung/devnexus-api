@@ -1,4 +1,3 @@
-// routes/ChatRoutes.js
 const express = require('express');
 const router = express.Router();
 
@@ -19,7 +18,7 @@ const asyncWrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)
 
 // ---------------- Multer (chat attachments) ---
 // IMPORTANT: write to <project>/uploads/chat (NOT src/uploads/chat)
-const UPLOAD_DIR = path.join(__dirname, '..', '..', 'uploads', 'chat'); // ← fixed
+const UPLOAD_DIR = path.join(__dirname, '..', '..', 'uploads', 'chat');
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
 const storage = multer.diskStorage({
@@ -31,10 +30,8 @@ const storage = multer.diskStorage({
     },
 });
 
-// 8MB per file (tune as needed)
 const limits = { fileSize: 8 * 1024 * 1024 };
 
-// Only allow images for now. If you want other types, widen this.
 const fileFilter = (_req, file, cb) => {
     if (file?.mimetype?.startsWith('image/')) return cb(null, true);
     return cb(new multer.MulterError('LIMIT_UNEXPECTED_FILE', 'files'));
@@ -48,6 +45,10 @@ router.post('/conversations/dm', auth, asyncWrap(Chats.startDM));
 router.post('/conversations', auth, asyncWrap(Chats.createConversation));
 router.get('/conversations', auth, asyncWrap(Chats.listMyConversations));
 router.get('/conversations/:id', auth, asyncWrap(Chats.getConversation));
+
+// NEW: destructive & exit actions
+router.post('/conversations/:id/leave', auth, asyncWrap(Chats.leaveConversation));
+router.delete('/conversations/:id', auth, asyncWrap(Chats.deleteConversation));
 
 // ---------------- Invitations -----------------
 router.post('/conversations/:id/invite', auth, asyncWrap(Chats.invite));
