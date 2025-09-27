@@ -6,6 +6,8 @@ const mongoose = require('mongoose');
 const app = require('./app');
 const { initSocket } = require('./socket');
 
+const { parseOrigins } = require('./config/cors-origins');
+
 const {
   PORT = 5000,
   MONGO_URI,
@@ -69,11 +71,3 @@ const mongoOpts = {
     process.exit(1);
   }
 })();
-
-function parseOrigins(csv) {
-  if (!csv) return true; // dev fallback; in prod, set CORS_ORIGINS explicitly
-  return csv
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean);
-}

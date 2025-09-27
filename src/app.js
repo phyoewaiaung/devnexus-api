@@ -8,6 +8,8 @@ const compression = require('compression');
 const rateLimit = require('express-rate-limit');
 const morgan = require('morgan');
 
+const { parseOrigins } = require('./config/cors-origins');
+
 const app = express();
 
 const {
@@ -95,19 +97,3 @@ app.use((err, _req, res, _next) => {
 });
 
 module.exports = app;
-
-function parseOrigins(csv) {
-  if (!csv) return null;
-  const list = csv
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean);
-  if (list.length === 0) return null;
-
-  // Return function for dynamic check per request Origin
-  return function originFn(origin, cb) {
-    if (!origin) return cb(null, true); // same-origin or non-browser
-    if (list.includes(origin)) return cb(null, true);
-    return cb(new Error(`Not allowed by CORS: ${origin}`));
-  };
-}
